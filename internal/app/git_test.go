@@ -242,6 +242,9 @@ func TestGitFolderDiscardsEveryChangeUnderIt(t *testing.T) {
 		"dir/nested/b.txt": "base b\n",
 		"other.txt":        "base other\n",
 	})
+	// Restoring with the Windows default would write CRLF and fail the
+	// contents check below.
+	gitRun(t, root, "config", "core.autocrlf", "false")
 	for path, body := range map[string]string{
 		"dir/a.txt":        "changed a\n",
 		"dir/nested/b.txt": "changed b\n",
