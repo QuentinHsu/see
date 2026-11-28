@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,17 +94,29 @@ const harnessWidth, harnessHeight = 1100, 700
 // harness runs the app's view in a tester, with background results
 // queued until the test lets them through.
 type harness struct {
-	t    *testing.T
-	a    *App
-	tt   *ui.Tester
-	q    chan func()
-	fc   *fakeClient
-	host *fakeHost
-	ran  int // queued results run
+	t        *testing.T
+	a        *App
+	tt       *ui.Tester
+	q        chan func()
+	fc       *fakeClient
+	host     *fakeHost
+	ran      int // queued results run
+	feedback []feedbackEntry
 }
 
 func newHarness(t *testing.T, root string) *harness {
 	return newHarnessWithConfig(t, root, &config.Config{ConfirmClose: true})
+}
+
+func newMultiRootHarness(t *testing.T, root string) *harness {
+	t.Helper()
+	return newMultiRootHarnessWithConfig(t, root, &config.Config{ConfirmClose: true})
+}
+
+func newMultiRootHarnessWithConfig(t *testing.T, root string, cfg *config.Config) *harness {
+	t.Helper()
+	cfg.SetBetaEnabled(config.BetaMultiRootWorkspaces, true)
+	return newHarnessWithConfig(t, root, cfg)
 }
 
 func newHarnessWithConfig(t *testing.T, root string, cfg *config.Config) *harness {
@@ -118,7 +131,7 @@ func newHarnessWithConfig(t *testing.T, root string, cfg *config.Config) *harnes
 	resetNotify()
 	t.Cleanup(resetNotify)
 	h.a.startLSP = func(func(string, ...any)) langserver.Starter {
-		return func(ctx context.Context, root string, onExit func(error)) (langserver.Client, error) {
+		return func(ctx context.Context, root string, _ []lsp.WorkspaceFolder, onExit func(error)) (langserver.Client, error) {
 			if h.fc.startErr != nil {
 				return nil, h.fc.startErr
 			}
@@ -126,6 +139,7 @@ func newHarnessWithConfig(t *testing.T, root string, cfg *config.Config) *harnes
 		}
 	}
 	h.tt = ui.NewTester(h.a.view, harnessWidth, harnessHeight)
+	h.installFeedbackLog()
 	if root != "" {
 		h.a.openWorkspace(root)
 		h.settle(func() bool { d := h.a.dirs[h.a.root]; return d != nil && d.loaded })
@@ -151,6 +165,58 @@ func testLogf(t *testing.T) func(string, ...any) {
 		}
 	}
 }
+
+// newHarness records the feedback the app reports in h.feedback: flash
+// events drain into toasts on the first frame after they land, after
+// which nothing observes them, so tests read the recording rather than
+// the state. Production leaves feedbackLog nil.
+func (h *harness) installFeedbackLog() {
+	feedbackLog = &h.feedback
+	h.t.Cleanup(func() { feedbackLog = nil })
+}
+
+// feedbackTexts is the feedback the test's app reported, errors as the
+// successes, in order.
+func (h *harness) feedbackTexts() []string {
+	var out []string
+	for _, e := range h.feedback {
+		out = append(out, e.msg)
+	}
+	return out
+}
+
+// hasFeedback reports whether the app reported exactly the message.
+func (h *harness) hasFeedback(msg string) bool {
+	for _, e := range h.feedback {
+		if e.msg == msg {
+			return true
+		}
+	}
+	return false
+}
+
+// feedbackContains reports whether some reported feedback carries part.
+func (h *harness) feedbackContains(part string) bool {
+	for _, e := range h.feedback {
+		if strings.Contains(e.msg, part) {
+			return true
+		}
+	}
+	return false
+}
+
+// feedbackError is the newest error the app reported, if any.
+func (h *harness) feedbackError() (string, bool) {
+	for i := len(h.feedback) - 1; i >= 0; i-- {
+		if h.feedback[i].err {
+			return h.feedback[i].msg, true
+		}
+	}
+	return "", false
+}
+
+// clearFeedback forgets what the app reported, as a test step ends.
+func (h *harness) clearFeedback() { h.feedback = nil }
 
 // treeHas reports whether the file tree shows a row of p.
 func (h *harness) treeHas(p string) bool {
@@ -216,6 +282,7 @@ type fakeClient struct {
 	prepareRename     func(ctx context.Context, uri string, pos lsp.Position) (*lsp.PrepareRenameResult, error)
 	noRename          bool // server without renameProvider
 	format            formatFake
+	watched           []lsp.FileChange
 	log               []string
 	shutdown          bool
 }
@@ -260,6 +327,19 @@ type callFake struct {
 	prepare  error
 	incoming func(lsp.CallItem) ([]lsp.CallEdge, error)
 	outgoing func(lsp.CallItem) ([]lsp.CallEdge, error)
+}
+
+func (f *fakeClient) DidChangeWatchedFiles(changes []lsp.FileChange) error {
+	f.mu.Lock()
+	f.watched = append(f.watched, changes...)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeClient) watchedFiles() []lsp.FileChange {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]lsp.FileChange(nil), f.watched...)
 }
 
 func (f *fakeClient) record(s string) {
@@ -330,7 +410,8 @@ func (f *fakeClient) InlayHints(ctx context.Context, uri string, r lsp.Range) ([
 	}
 	return f.inlayHints(ctx, uri, r)
 }
-func (f *fakeClient) HasSemanticTokens() bool { return f.semanticTokens != nil }
+func (f *fakeClient) SemanticTokensFull() bool { return f.semanticTokens != nil }
+func (f *fakeClient) HasSemanticTokens() bool  { return f.semanticTokens != nil }
 func (f *fakeClient) SemanticTokens(ctx context.Context, uri string, first, last int) (*lsp.SemanticTokensData, error) {
 	f.record("semanticTokens")
 	if f.semanticTokens == nil {
@@ -389,7 +470,7 @@ func (f *fakeClient) HasCodeActions() bool { return f.codeActions != nil || f.co
 func (f *fakeClient) CodeActionKinds() []string {
 	return []string{"quickfix"}
 }
-func (f *fakeClient) HasExecuteCommand() bool { return !f.noCommands }
+func (f *fakeClient) SupportsCommand(string) bool { return !f.noCommands }
 func (f *fakeClient) CodeActions(ctx context.Context, uri string, r lsp.Range, ds []lsp.Diagnostic) ([]lsp.CodeAction, error) {
 	f.record("codeActions")
 	return f.codeActions, f.codeActionsErr
@@ -464,7 +545,9 @@ func writeTree(t *testing.T, files map[string]string) string {
 }
 
 func serverOf(root string, c langserver.Client) *langserver.Server {
-	return langserver.New(langserver.Options{Name: "gopls", Root: root, Start: func(context.Context, string, func(error)) (langserver.Client, error) { return c, nil }})
+	return langserver.New(langserver.Options{Name: "gopls", Root: root, Start: func(context.Context, string, []lsp.WorkspaceFolder, func(error)) (langserver.Client, error) {
+		return c, nil
+	}})
 }
 
 // fakeHost is a desktop without a window, as platform.NoDesktop, but for what a test

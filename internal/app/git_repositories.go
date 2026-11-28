@@ -58,7 +58,7 @@ func (a *App) gitRepositories(c *ui.Context) {
 	v, repo := &a.git.repositoryView, a.git.repository
 	ui.Scroll(c).Grow(1).FillWidth().Children(func() {
 		ui.Column(c).FillWidth().Padding(0, sidebarInset, 6, sidebarInset).Children(func() {
-			if a.cfg.GitAutoDiscover {
+			if a.gitRepositorySelectionEnabled() {
 				if !a.git.repositoriesLoaded {
 					ui.Text(c, locales.GitScanningRepositories()).FontSize(11).TextColor(colors(c).Muted).Padding(4, 8)
 				} else if len(a.git.repositories) == 0 {
@@ -182,12 +182,15 @@ func (a *App) gitRepositoryChoice(c *ui.Context, root string) {
 	})
 }
 
-// gitRepositoryLabel is how a repository is named in the sidebar: its
-// path from the workspace, or its base name when it lies outside it.
+// gitRepositoryLabel is how a repository is named in the sidebar: the
+// workspace's name for it, its path in the workspace, or its base name.
 func (a *App) gitRepositoryLabel(root string) string {
+	if label := a.git.repositoryLabels[root]; label != "" {
+		return label
+	}
 	label := filepath.Base(root)
-	if rel, err := filepath.Rel(a.realRoot, root); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		label = filepath.ToSlash(rel)
+	if path := a.workspacePath(root); path != "" && path != root && path != "." {
+		label = path
 	}
 	return label
 }
@@ -221,11 +224,11 @@ func (a *App) selectGitRepository(root string) {
 	if root == a.git.root {
 		return
 	}
-	if root != "" && (!a.cfg.GitAutoDiscover || !slices.Contains(a.git.repositories, root)) {
+	if root != "" && (!a.gitRepositorySelectionEnabled() || !slices.Contains(a.git.repositories, root)) {
 		return
 	}
-	initialContaining := a.cfg.GitAutoDiscover && a.git.root == "" && root != "" && gitRepositoryContaining(a.realRoot, []string{root}) != ""
-	if a.cfg.GitAutoDiscover && a.git.root == "" && !initialContaining {
+	initialContaining := a.gitRepositorySelectionEnabled() && a.git.root == "" && root != "" && gitRepositoryContaining(a.realRoot, []string{root}) != ""
+	if a.gitRepositorySelectionEnabled() && a.git.root == "" && !initialContaining {
 		a.git.pendingTabs = nil
 	}
 	if !initialContaining {
@@ -410,7 +413,7 @@ func (a *App) submitTag(q *gitTagDialog) {
 				q.err = gitErrLine(err)
 			} else {
 				a.git.repositoryView.tag = nil
-				a.note(locales.GitTagCreated(name), false)
+				a.flash(locales.GitTagCreated(name))
 			}
 			a.refreshGit()
 		})
@@ -441,10 +444,10 @@ func (a *App) cherryPick(cm git.Commit) {
 				if paused {
 					msg += " " + locales.GitCherryPickPaused()
 				}
-				a.note(locales.MsgGit()+msg, true)
+				a.fail(locales.MsgGit() + msg)
 			} else {
 				a.git.diffSeq++
-				a.note(locales.GitCherryPicked(cm.Short), false)
+				a.flash(locales.GitCherryPicked(cm.Short))
 				a.revealLogCommit(head)
 			}
 			if !a.watching {

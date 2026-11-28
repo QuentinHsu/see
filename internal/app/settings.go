@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"github.com/egoist/mygo/ui/editor"
 
 	"see/internal/config"
+	"see/internal/proc"
 	"see/internal/search"
 	"see/internal/workspace"
 
@@ -52,6 +54,7 @@ var settingsPanes = []settingsPane{
 	{"terminal", "Terminal", icPrompt, ui.RGB(0x2c, 0x2c, 0x2e), 0, "shell font size copy on select panel external ghostty rex seedmux"},
 	{"notifications", "Notifications", icPrompt, ui.RGB(0xff, 0x95, 0x00), 1, "notify waiting done failed sound dock badge bounce"},
 	{"intelligence", "Code Intelligence", icSparkle, ui.RGB(0xaf, 0x52, 0xde), 1, "gopls tsrs typescript javascript language server go to definition hover trusted folders trust"},
+	{"beta", "Beta Features", icSparkle, ui.RGB(0xff, 0x2d, 0x92), 2, "beta experimental unfinished vibrancy material glass sidebar multi-root workspace folders 测试 实验 边栏 毛玻璃 材质 多根 工作区 文件夹"},
 	{"advanced", "Advanced", icGear, ui.RGB(0x8e, 0x8e, 0x93), 2, "config reset data folder"},
 	{"search", "Search", icSearch, ui.RGB(0xff, 0x95, 0x00), 1, "ripgrep rg find open quickly files"},
 	{"shortcuts", "Shortcuts", icCommand, ui.RGB(0x63, 0x63, 0x66), 2, "keys keyboard"},
@@ -86,6 +89,7 @@ type settingsState struct {
 	languageChoice      int
 	languageChoiceSet   bool
 	terminalIcons       map[string]*ui.Bitmap
+	betaDrafts          map[string]*string
 }
 
 func (a *App) settingsGo(pane string) {
@@ -125,6 +129,13 @@ func (a *App) gitAutoDiscoverSettingChanged() {
 		a.gitDiscoveryChanged()
 	} else {
 		a.refreshGitDiscovery()
+	}
+}
+
+func (a *App) vibrancySettingChanged() {
+	a.settingsChanged()
+	if a.vibrancyChanged != nil {
+		a.vibrancyChanged()
 	}
 }
 
@@ -347,6 +358,9 @@ func (a *App) settingsSidebar(c *ui.Context) {
 	group := -1
 	shown := 0
 	for _, p := range settingsPanes {
+		if p.id == "beta" && len(config.ActiveBetaFeatures()) == 0 {
+			continue
+		}
 		p.title = settingsPaneTitle(p.id)
 		if q != "" && !strings.Contains(strings.ToLower(p.title+" "+p.keywords), q) {
 			continue
@@ -385,6 +399,9 @@ func (a *App) settingsStep(q string, up bool) {
 		ids = append(ids, "about")
 	}
 	for _, p := range settingsPanes {
+		if p.id == "beta" && len(config.ActiveBetaFeatures()) == 0 {
+			continue
+		}
 		p.title = settingsPaneTitle(p.id)
 		if q == "" || strings.Contains(strings.ToLower(p.title+" "+p.keywords), q) {
 			ids = append(ids, p.id)
@@ -488,6 +505,8 @@ func (a *App) settingsContent(c *ui.Context, bar ui.TitleBar) {
 				a.notificationsPane(c)
 			case "intelligence":
 				a.intelligencePane(c)
+			case "beta":
+				a.betaPane(c)
 			case "search":
 				a.searchPane(c)
 			case "shortcuts":
@@ -638,21 +657,7 @@ func (a *App) generalPane(c *ui.Context) {
 		},
 	)
 	heading(c, locales.MsgShellCommand())
-	card(c, func() {
-		detail := "Install see in ~/.local/bin to open files and folders from a terminal. Add ~/.local/bin to your PATH if needed."
-		if s.shellCommandMessage != "" {
-			detail = s.shellCommandMessage
-		}
-		labeled(c, locales.MsgSeeCommand(), detail)
-		ui.Button(c.Key("install-see"), locales.Install()).Label(locales.MsgInstallSeeCommand()).OnClick(func() {
-			a.installSee()
-			s.shellCommandMessage = a.notice
-		})
-		ui.Button(c.Key("uninstall-see"), locales.MsgUninstall()).Label(locales.MsgUninstallSeeCommand()).OnClick(func() {
-			a.uninstallSee()
-			s.shellCommandMessage = a.notice
-		})
-	})
+	a.shellCommandCard(c)
 	heading(c, locales.MsgRecentFolders())
 	card(c, func() {
 		n := len(a.cfg.Recent)
@@ -686,6 +691,27 @@ func (a *App) generalPane(c *ui.Context) {
 			}
 		},
 	)
+}
+
+// shellCommandCard is the install and uninstall of the see command, its
+// outcome inline in the card besides the feedback the window carries.
+// Its own method, not a line of generalPane, so tests can build it
+// without the panes that need the running application.
+func (a *App) shellCommandCard(c *ui.Context) {
+	s := &a.settings
+	card(c, func() {
+		detail := "Install see in ~/.local/bin to open files and folders from a terminal. Add ~/.local/bin to your PATH if needed."
+		if s.shellCommandMessage != "" {
+			detail = s.shellCommandMessage
+		}
+		labeled(c, locales.MsgSeeCommand(), detail)
+		ui.Button(c.Key("install-see"), locales.Install()).Label(locales.MsgInstallSeeCommand()).OnClick(func() {
+			s.shellCommandMessage = a.installSee()
+		})
+		ui.Button(c.Key("uninstall-see"), locales.MsgUninstall()).Label(locales.MsgUninstallSeeCommand()).OnClick(func() {
+			s.shellCommandMessage = a.uninstallSee()
+		})
+	})
 }
 
 func (a *App) initFontValues() {
@@ -1065,9 +1091,10 @@ func (a *App) intelligencePane(c *ui.Context) {
 				st = s
 			}
 			idx := i
+			customPath, customErr := languages.FindConfigured(a.root, spec)
 			a.toolRow(c.Key("custom-"+spec.Name), toolRow{
 				id: spec.Name, language: customLanguageLabel(spec), server: spec.Name,
-				path: configuredPath(a.root, spec), state: st.state, serverErr: st.err,
+				path: customPath, findErr: customErr, state: st.state, serverErr: st.err,
 				retry: func() { a.retryCustomLSP(idx) },
 				hint:  strings.Join(spec.Command, " "),
 			})
@@ -1106,16 +1133,6 @@ func customLanguageLabel(spec config.LSPConfig) string {
 	return spec.Name
 }
 
-// configuredPath resolves a configured server's executable for display,
-// or "" when it is not found.
-func configuredPath(root string, spec config.LSPConfig) string {
-	p, err := languages.FindConfigured(root, spec)
-	if err != nil {
-		return ""
-	}
-	return p
-}
-
 // toolRow is a tool in Settings: a language server, or ripgrep, with See's
 // own installation of it.
 type toolRow struct {
@@ -1142,6 +1159,11 @@ func (a *App) toolRow(c *ui.Context, r toolRow) {
 		status = locales.Starting()
 	case r.state == langserver.Ready:
 		status = locales.Running()
+	case r.findErr != nil && errors.Is(r.findErr, proc.ErrUntrustedExecutable):
+		// The software may well be installed; it is where it is that
+		// cannot run. Saying NotInstalled would send the user to
+		// install what they have.
+		status, color = locales.Denied(), theme.Of(c).Err
 	case r.findErr != nil:
 		status = locales.NotInstalled()
 	}
@@ -1149,8 +1171,11 @@ func (a *App) toolRow(c *ui.Context, r toolRow) {
 	if r.path != "" {
 		detail += " · " + tildePath(r.path)
 	}
-	if r.state == langserver.Failed && r.serverErr != nil {
+	switch {
+	case r.state == langserver.Failed && r.serverErr != nil:
 		detail = r.server + " · " + shortErr(r.serverErr)
+	case r.findErr != nil && errors.Is(r.findErr, proc.ErrUntrustedExecutable):
+		detail = r.server + " · " + shortErr(r.findErr)
 	}
 	ui.Column(c).FillWidth().Padding(12, 0).Gap(10).Children(func() {
 		ui.Row(c).FillWidth().Gap(12).AlignItems(ui.Center).Children(func() {
@@ -1238,6 +1263,9 @@ func (a *App) searchPane(c *ui.Context) {
 	status := "Finds text in the workspace · " + tildePath(rg)
 	if err != nil {
 		status = "Not installed: Open Quickly lists files without it"
+		if errors.Is(err, proc.ErrUntrustedExecutable) {
+			status = "Denied: executables inside this workspace are never run"
+		}
 	}
 	r := toolRow{
 		id: "ripgrep", language: "ripgrep", server: "ripgrep",
@@ -1276,6 +1304,149 @@ func (a *App) shortcutsPane(c *ui.Context) {
 	card(c, fns...)
 }
 
+func betaFeatureTitle(id string) string {
+	if id == config.BetaMultiRootWorkspaces {
+		return locales.BetaMultiRootWorkspaces()
+	}
+	if id == config.BetaSidebarVibrancy {
+		return locales.SidebarVibrancy()
+	}
+	return id
+}
+
+func betaFeatureDescription(id string) string {
+	if id == config.BetaMultiRootWorkspaces {
+		return locales.BetaMultiRootWorkspacesDescription()
+	}
+	if id == config.BetaSidebarVibrancy {
+		return locales.SidebarVibrancyDescription()
+	}
+	return ""
+}
+
+func betaSettingTitle(feature, key string) string {
+	if feature == config.BetaSidebarVibrancy && key == "material" {
+		return locales.BetaVibrancyMaterial()
+	}
+	return key
+}
+
+func betaSettingDescription(feature, key string) string {
+	if feature == config.BetaSidebarVibrancy && key == "material" {
+		return locales.BetaVibrancyMaterialDescription()
+	}
+	return ""
+}
+
+func betaChoiceTitle(feature, key, choice string) string {
+	if feature == config.BetaSidebarVibrancy && key == "material" {
+		switch choice {
+		case "sidebar":
+			return locales.BetaVibrancyMaterialSidebar()
+		case "window":
+			return locales.BetaVibrancyMaterialWindow()
+		case "glass":
+			return locales.BetaVibrancyMaterialGlass()
+		}
+	}
+	return choice
+}
+
+func (a *App) betaSettingChanged(feature string) {
+	if feature == config.BetaSidebarVibrancy {
+		a.vibrancySettingChanged()
+		return
+	}
+	a.settingsChanged()
+}
+
+func (a *App) betaDraft(feature, key, value string) *string {
+	id := feature + "\x00" + key
+	if a.settings.betaDrafts == nil {
+		a.settings.betaDrafts = map[string]*string{}
+	}
+	if draft := a.settings.betaDrafts[id]; draft != nil {
+		return draft
+	}
+	draft := new(string)
+	*draft = value
+	a.settings.betaDrafts[id] = draft
+	return draft
+}
+
+func (a *App) betaSettingControl(c *ui.Context, feature string, setting config.BetaSettingInfo) {
+	label := betaSettingTitle(feature, setting.Key)
+	labeled(c, label, betaSettingDescription(feature, setting.Key))
+	switch setting.Kind {
+	case config.BetaBoolSetting:
+		value := a.cfg.BetaBool(feature, setting.Key)
+		ui.Switch(c, &value).Label(label).OnClick(func() {
+			if a.cfg.SetBetaSetting(feature, setting.Key, value) {
+				a.betaSettingChanged(feature)
+			}
+		})
+	case config.BetaChoiceSetting:
+		choice := a.cfg.BetaString(feature, setting.Key)
+		index := slices.Index(setting.Choices, choice)
+		if index < 0 {
+			index = 0
+		}
+		labels := make([]string, len(setting.Choices))
+		for i, choice := range setting.Choices {
+			labels[i] = betaChoiceTitle(feature, setting.Key, choice)
+		}
+		if ui.Segmented(c, &index, labels...).Label(label).Changed() {
+			if a.cfg.SetBetaSetting(feature, setting.Key, setting.Choices[index]) {
+				a.betaSettingChanged(feature)
+			}
+		}
+	case config.BetaStringSetting:
+		draft := a.betaDraft(feature, setting.Key, a.cfg.BetaString(feature, setting.Key))
+		if ui.TextInput(c, draft).Label(label).Width(170).Changed() {
+			if a.cfg.SetBetaSetting(feature, setting.Key, *draft) {
+				a.betaSettingChanged(feature)
+			}
+		}
+	case config.BetaNumberSetting:
+		draft := a.betaDraft(feature, setting.Key, strconv.FormatFloat(a.cfg.BetaNumber(feature, setting.Key), 'f', -1, 64))
+		if ui.TextInput(c, draft).Label(label).Width(110).Changed() {
+			if value, err := strconv.ParseFloat(strings.TrimSpace(*draft), 64); err == nil && a.cfg.SetBetaSetting(feature, setting.Key, value) {
+				a.betaSettingChanged(feature)
+			}
+		}
+	case config.BetaIntSetting:
+		draft := a.betaDraft(feature, setting.Key, strconv.Itoa(a.cfg.BetaInt(feature, setting.Key)))
+		if ui.TextInput(c, draft).Label(label).Width(110).Changed() {
+			if value, err := strconv.Atoi(strings.TrimSpace(*draft)); err == nil && a.cfg.SetBetaSetting(feature, setting.Key, value) {
+				a.betaSettingChanged(feature)
+			}
+		}
+	}
+}
+
+func (a *App) betaPane(c *ui.Context) {
+	features := config.ActiveBetaFeatures()
+	ui.Text(c, locales.BetaFeaturesDescription()).FontSize(12).TextColor(theme.Of(c).Muted).Padding(14, 4, 2, 4)
+	for _, feature := range features {
+		heading(c, betaFeatureTitle(feature.ID))
+		rows := []func(){func() {
+			labeled(c, betaFeatureTitle(feature.ID), betaFeatureDescription(feature.ID))
+			enabled := a.cfg.BetaEnabled(feature.ID)
+			ui.Switch(c, &enabled).Label(betaFeatureTitle(feature.ID)).OnClick(func() {
+				if a.cfg.SetBetaEnabled(feature.ID, enabled) {
+					a.betaSettingChanged(feature.ID)
+				}
+			})
+		}}
+		if a.cfg.BetaEnabled(feature.ID) {
+			for _, setting := range feature.Settings {
+				rows = append(rows, func() { a.betaSettingControl(c, feature.ID, setting) })
+			}
+		}
+		card(c, rows...)
+	}
+}
+
 func (a *App) advancedPane(c *ui.Context) {
 	card(c,
 		func() {
@@ -1297,8 +1468,9 @@ func (a *App) advancedPane(c *ui.Context) {
 				def.SetPath(a.cfg.Path())
 				def.SavedFindQueries = a.cfg.SavedFindQueries
 				*a.cfg = *def
+				a.settings.betaDrafts = nil
 				a.applyEditorPrefsAcrossWindows()
-				a.settingsChanged()
+				a.vibrancySettingChanged()
 			}
 		},
 	)
@@ -1616,6 +1788,8 @@ func settingsPaneTitle(id string) string {
 		return locales.Notifications()
 	case "intelligence":
 		return locales.CodeIntelligence()
+	case "beta":
+		return locales.BetaFeatures()
 	case "advanced":
 		return locales.Advanced()
 	case "search":

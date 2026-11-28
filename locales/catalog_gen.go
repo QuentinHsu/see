@@ -158,6 +158,48 @@ func (msgs Messages) GitSelectRepositoryToSeeChanges() string {
 	return Catalog.Format(msgs.locale, "gitSelectRepositoryToSeeChanges", nil)
 }
 
+// WorkspaceRequiresBeta says "Multi-root workspaces are a beta feature. Enable them in Settings > Beta Features."
+// in the language the app shows.
+func WorkspaceRequiresBeta() string { return In(i18n.Locale()).WorkspaceRequiresBeta() }
+
+// WorkspaceRequiresBeta says "Multi-root workspaces are a beta feature. Enable them in Settings > Beta Features."
+// in the language of msgs.
+func (msgs Messages) WorkspaceRequiresBeta() string {
+	return Catalog.Format(msgs.locale, "workspaceRequiresBeta", nil)
+}
+
+// WorkspaceAddFolder says "Add Folder to Workspace…"
+// in the language the app shows.
+func WorkspaceAddFolder() string { return In(i18n.Locale()).WorkspaceAddFolder() }
+
+// WorkspaceAddFolder says "Add Folder to Workspace…"
+// in the language of msgs.
+func (msgs Messages) WorkspaceAddFolder() string {
+	return Catalog.Format(msgs.locale, "workspaceAddFolder", nil)
+}
+
+// WorkspaceUpdateFailed says "Could not update workspace file “{path}”: {reason}"
+// in the language the app shows.
+func WorkspaceUpdateFailed(path string, reason string) string {
+	return In(i18n.Locale()).WorkspaceUpdateFailed(path, reason)
+}
+
+// WorkspaceUpdateFailed says "Could not update workspace file “{path}”: {reason}"
+// in the language of msgs.
+func (msgs Messages) WorkspaceUpdateFailed(path string, reason string) string {
+	return Catalog.Format(msgs.locale, "workspaceUpdateFailed", map[string]any{"path": path, "reason": reason})
+}
+
+// WorkspaceRemoveFolder says "Remove Folder from Workspace"
+// in the language the app shows.
+func WorkspaceRemoveFolder() string { return In(i18n.Locale()).WorkspaceRemoveFolder() }
+
+// WorkspaceRemoveFolder says "Remove Folder from Workspace"
+// in the language of msgs.
+func (msgs Messages) WorkspaceRemoveFolder() string {
+	return Catalog.Format(msgs.locale, "workspaceRemoveFolder", nil)
+}
+
 // CommandToggleReaderMode says "Toggle Reader Mode"
 // in the language the app shows.
 func CommandToggleReaderMode() string { return In(i18n.Locale()).CommandToggleReaderMode() }
@@ -1100,6 +1142,36 @@ func LocalHistoryCurrentUnsaved() string { return In(i18n.Locale()).LocalHistory
 // in the language of msgs.
 func (msgs Messages) LocalHistoryCurrentUnsaved() string {
 	return Catalog.Format(msgs.locale, "localHistoryCurrentUnsaved", nil)
+}
+
+// LocalHistoryCorrupt says "This snapshot is corrupt and cannot be restored."
+// in the language the app shows.
+func LocalHistoryCorrupt() string { return In(i18n.Locale()).LocalHistoryCorrupt() }
+
+// LocalHistoryCorrupt says "This snapshot is corrupt and cannot be restored."
+// in the language of msgs.
+func (msgs Messages) LocalHistoryCorrupt() string {
+	return Catalog.Format(msgs.locale, "localHistoryCorrupt", nil)
+}
+
+// LocalHistoryCorruptDetail says "Its stored content no longer matches the digest recorded when it was written."
+// in the language the app shows.
+func LocalHistoryCorruptDetail() string { return In(i18n.Locale()).LocalHistoryCorruptDetail() }
+
+// LocalHistoryCorruptDetail says "Its stored content no longer matches the digest recorded when it was written."
+// in the language of msgs.
+func (msgs Messages) LocalHistoryCorruptDetail() string {
+	return Catalog.Format(msgs.locale, "localHistoryCorruptDetail", nil)
+}
+
+// LocalHistoryCorruptTag says "corrupt"
+// in the language the app shows.
+func LocalHistoryCorruptTag() string { return In(i18n.Locale()).LocalHistoryCorruptTag() }
+
+// LocalHistoryCorruptTag says "corrupt"
+// in the language of msgs.
+func (msgs Messages) LocalHistoryCorruptTag() string {
+	return Catalog.Format(msgs.locale, "localHistoryCorruptTag", nil)
 }
 
 // LocalHistoryNoSnapshots says "No local snapshots yet"
@@ -3064,6 +3136,46 @@ func (msgs Messages) ProblemsTrust() string {
 	return Catalog.Format(msgs.locale, "problemsTrust", nil)
 }
 
+// ProblemsTrustWorkspace says "Trust all workspace folders to run language servers."
+// in the language the app shows.
+func ProblemsTrustWorkspace() string { return In(i18n.Locale()).ProblemsTrustWorkspace() }
+
+// ProblemsTrustWorkspace says "Trust all workspace folders to run language servers."
+// in the language of msgs.
+func (msgs Messages) ProblemsTrustWorkspace() string {
+	return Catalog.Format(msgs.locale, "problemsTrustWorkspace", nil)
+}
+
+// TrustWorkspaceLead says "Trust this workspace to run language servers?"
+// in the language the app shows.
+func TrustWorkspaceLead() string { return In(i18n.Locale()).TrustWorkspaceLead() }
+
+// TrustWorkspaceLead says "Trust this workspace to run language servers?"
+// in the language of msgs.
+func (msgs Messages) TrustWorkspaceLead() string {
+	return Catalog.Format(msgs.locale, "trustWorkspaceLead", nil)
+}
+
+// TrustWorkspace says "Trust Workspace"
+// in the language the app shows.
+func TrustWorkspace() string { return In(i18n.Locale()).TrustWorkspace() }
+
+// TrustWorkspace says "Trust Workspace"
+// in the language of msgs.
+func (msgs Messages) TrustWorkspace() string {
+	return Catalog.Format(msgs.locale, "trustWorkspace", nil)
+}
+
+// TrustWorkspaceSearchSymbols says "Trust workspace to search symbols"
+// in the language the app shows.
+func TrustWorkspaceSearchSymbols() string { return In(i18n.Locale()).TrustWorkspaceSearchSymbols() }
+
+// TrustWorkspaceSearchSymbols says "Trust workspace to search symbols"
+// in the language of msgs.
+func (msgs Messages) TrustWorkspaceSearchSymbols() string {
+	return Catalog.Format(msgs.locale, "trustWorkspaceSearchSymbols", nil)
+}
+
 // ProblemsStarting says "Starting project diagnostics…"
 // in the language the app shows.
 func ProblemsStarting() string { return In(i18n.Locale()).ProblemsStarting() }
@@ -3882,6 +3994,26 @@ func Appearance() string { return In(i18n.Locale()).Appearance() }
 // in the language of msgs.
 func (msgs Messages) Appearance() string {
 	return Catalog.Format(msgs.locale, "appearance", nil)
+}
+
+// SidebarVibrancy says "Sidebar Vibrancy"
+// in the language the app shows.
+func SidebarVibrancy() string { return In(i18n.Locale()).SidebarVibrancy() }
+
+// SidebarVibrancy says "Sidebar Vibrancy"
+// in the language of msgs.
+func (msgs Messages) SidebarVibrancy() string {
+	return Catalog.Format(msgs.locale, "sidebarVibrancy", nil)
+}
+
+// SidebarVibrancyDescription says "Show the system material behind the sidebar."
+// in the language the app shows.
+func SidebarVibrancyDescription() string { return In(i18n.Locale()).SidebarVibrancyDescription() }
+
+// SidebarVibrancyDescription says "Show the system material behind the sidebar."
+// in the language of msgs.
+func (msgs Messages) SidebarVibrancyDescription() string {
+	return Catalog.Format(msgs.locale, "sidebarVibrancyDescription", nil)
 }
 
 // Light says "Light"
@@ -4772,6 +4904,18 @@ func MsgNoMatches() string { return In(i18n.Locale()).MsgNoMatches() }
 // in the language of msgs.
 func (msgs Messages) MsgNoMatches() string {
 	return Catalog.Format(msgs.locale, "msgNoMatches", nil)
+}
+
+// MsgOnlyTheFirstCountFilesAreListed says "Only the first {count} files are listed — type more of the name."
+// in the language the app shows.
+func MsgOnlyTheFirstCountFilesAreListed(count string) string {
+	return In(i18n.Locale()).MsgOnlyTheFirstCountFilesAreListed(count)
+}
+
+// MsgOnlyTheFirstCountFilesAreListed says "Only the first {count} files are listed — type more of the name."
+// in the language of msgs.
+func (msgs Messages) MsgOnlyTheFirstCountFilesAreListed(count string) string {
+	return Catalog.Format(msgs.locale, "msgOnlyTheFirstCountFilesAreListed", map[string]any{"count": count})
 }
 
 // MsgImagePreviewArea says "Image preview area"
@@ -12454,4 +12598,170 @@ func RelativeFullDate(weekday string, date string, time_ string) string {
 // in the language of msgs.
 func (msgs Messages) RelativeFullDate(weekday string, date string, time_ string) string {
 	return Catalog.Format(msgs.locale, "relativeFullDate", map[string]any{"weekday": weekday, "date": date, "time": time_})
+}
+
+// BetaFeatures says "Beta Features"
+// in the language the app shows.
+func BetaFeatures() string { return In(i18n.Locale()).BetaFeatures() }
+
+// BetaFeatures says "Beta Features"
+// in the language of msgs.
+func (msgs Messages) BetaFeatures() string {
+	return Catalog.Format(msgs.locale, "betaFeatures", nil)
+}
+
+// BetaFeaturesDescription says "Try unfinished features. They may change or disappear, and their settings move automatically when they become stable."
+// in the language the app shows.
+func BetaFeaturesDescription() string { return In(i18n.Locale()).BetaFeaturesDescription() }
+
+// BetaFeaturesDescription says "Try unfinished features. They may change or disappear, and their settings move automatically when they become stable."
+// in the language of msgs.
+func (msgs Messages) BetaFeaturesDescription() string {
+	return Catalog.Format(msgs.locale, "betaFeaturesDescription", nil)
+}
+
+// BetaMultiRootWorkspaces says "Multi-root Workspaces"
+// in the language the app shows.
+func BetaMultiRootWorkspaces() string { return In(i18n.Locale()).BetaMultiRootWorkspaces() }
+
+// BetaMultiRootWorkspaces says "Multi-root Workspaces"
+// in the language of msgs.
+func (msgs Messages) BetaMultiRootWorkspaces() string {
+	return Catalog.Format(msgs.locale, "betaMultiRootWorkspaces", nil)
+}
+
+// BetaMultiRootWorkspacesDescription says "Open and edit VS Code workspaces with multiple folders. Applies when a workspace is opened."
+// in the language the app shows.
+func BetaMultiRootWorkspacesDescription() string {
+	return In(i18n.Locale()).BetaMultiRootWorkspacesDescription()
+}
+
+// BetaMultiRootWorkspacesDescription says "Open and edit VS Code workspaces with multiple folders. Applies when a workspace is opened."
+// in the language of msgs.
+func (msgs Messages) BetaMultiRootWorkspacesDescription() string {
+	return Catalog.Format(msgs.locale, "betaMultiRootWorkspacesDescription", nil)
+}
+
+// BetaVibrancyMaterial says "Material"
+// in the language the app shows.
+func BetaVibrancyMaterial() string { return In(i18n.Locale()).BetaVibrancyMaterial() }
+
+// BetaVibrancyMaterial says "Material"
+// in the language of msgs.
+func (msgs Messages) BetaVibrancyMaterial() string {
+	return Catalog.Format(msgs.locale, "betaVibrancyMaterial", nil)
+}
+
+// BetaVibrancyMaterialDescription says "Choose the experimental system material behind project windows."
+// in the language the app shows.
+func BetaVibrancyMaterialDescription() string {
+	return In(i18n.Locale()).BetaVibrancyMaterialDescription()
+}
+
+// BetaVibrancyMaterialDescription says "Choose the experimental system material behind project windows."
+// in the language of msgs.
+func (msgs Messages) BetaVibrancyMaterialDescription() string {
+	return Catalog.Format(msgs.locale, "betaVibrancyMaterialDescription", nil)
+}
+
+// BetaVibrancyMaterialSidebar says "Sidebar"
+// in the language the app shows.
+func BetaVibrancyMaterialSidebar() string { return In(i18n.Locale()).BetaVibrancyMaterialSidebar() }
+
+// BetaVibrancyMaterialSidebar says "Sidebar"
+// in the language of msgs.
+func (msgs Messages) BetaVibrancyMaterialSidebar() string {
+	return Catalog.Format(msgs.locale, "betaVibrancyMaterialSidebar", nil)
+}
+
+// BetaVibrancyMaterialWindow says "Window"
+// in the language the app shows.
+func BetaVibrancyMaterialWindow() string { return In(i18n.Locale()).BetaVibrancyMaterialWindow() }
+
+// BetaVibrancyMaterialWindow says "Window"
+// in the language of msgs.
+func (msgs Messages) BetaVibrancyMaterialWindow() string {
+	return Catalog.Format(msgs.locale, "betaVibrancyMaterialWindow", nil)
+}
+
+// BetaVibrancyMaterialGlass says "Glass"
+// in the language the app shows.
+func BetaVibrancyMaterialGlass() string { return In(i18n.Locale()).BetaVibrancyMaterialGlass() }
+
+// BetaVibrancyMaterialGlass says "Glass"
+// in the language of msgs.
+func (msgs Messages) BetaVibrancyMaterialGlass() string {
+	return Catalog.Format(msgs.locale, "betaVibrancyMaterialGlass", nil)
+}
+
+// Denied says "Denied"
+// in the language the app shows.
+func Denied() string { return In(i18n.Locale()).Denied() }
+
+// Denied says "Denied"
+// in the language of msgs.
+func (msgs Messages) Denied() string {
+	return Catalog.Format(msgs.locale, "denied", nil)
+}
+
+// MsgDegraded says "Degraded · "
+// in the language the app shows.
+func MsgDegraded() string { return In(i18n.Locale()).MsgDegraded() }
+
+// MsgDegraded says "Degraded · "
+// in the language of msgs.
+func (msgs Messages) MsgDegraded() string {
+	return Catalog.Format(msgs.locale, "msgDegraded", nil)
+}
+
+// MsgDegradedExplanation says "Document sync failed once; it recovers when the next change reaches the server."
+// in the language the app shows.
+func MsgDegradedExplanation() string { return In(i18n.Locale()).MsgDegradedExplanation() }
+
+// MsgDegradedExplanation says "Document sync failed once; it recovers when the next change reaches the server."
+// in the language of msgs.
+func (msgs Messages) MsgDegradedExplanation() string {
+	return Catalog.Format(msgs.locale, "msgDegradedExplanation", nil)
+}
+
+// MsgServerCrashedRepeatedly says "crashed repeatedly — restart it with Retry"
+// in the language the app shows.
+func MsgServerCrashedRepeatedly() string { return In(i18n.Locale()).MsgServerCrashedRepeatedly() }
+
+// MsgServerCrashedRepeatedly says "crashed repeatedly — restart it with Retry"
+// in the language of msgs.
+func (msgs Messages) MsgServerCrashedRepeatedly() string {
+	return Catalog.Format(msgs.locale, "msgServerCrashedRepeatedly", nil)
+}
+
+// ErrorBannerMore says "{count, plural, one { +# more} other { +# more}}"
+// in the language the app shows.
+func ErrorBannerMore(count int) string { return In(i18n.Locale()).ErrorBannerMore(count) }
+
+// ErrorBannerMore says "{count, plural, one { +# more} other { +# more}}"
+// in the language of msgs.
+func (msgs Messages) ErrorBannerMore(count int) string {
+	return Catalog.Format(msgs.locale, "errorBannerMore", map[string]any{"count": count})
+}
+
+// Review says "Review"
+// in the language the app shows.
+func Review() string { return In(i18n.Locale()).Review() }
+
+// Review says "Review"
+// in the language of msgs.
+func (msgs Messages) Review() string {
+	return Catalog.Format(msgs.locale, "review", nil)
+}
+
+// MsgConfigLoadProblem says "Some settings could not be loaded and were reset to defaults: {detail}"
+// in the language the app shows.
+func MsgConfigLoadProblem(detail string) string {
+	return In(i18n.Locale()).MsgConfigLoadProblem(detail)
+}
+
+// MsgConfigLoadProblem says "Some settings could not be loaded and were reset to defaults: {detail}"
+// in the language of msgs.
+func (msgs Messages) MsgConfigLoadProblem(detail string) string {
+	return Catalog.Format(msgs.locale, "msgConfigLoadProblem", map[string]any{"detail": detail})
 }

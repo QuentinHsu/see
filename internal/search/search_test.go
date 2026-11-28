@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"see/internal/proc"
 )
 
 func tree(t *testing.T, files map[string]string) string {
@@ -34,7 +36,7 @@ func ripgrep(t *testing.T) string {
 func run(t *testing.T, rg, root string, o Options) (map[string][]Match, Stats) {
 	t.Helper()
 	got := map[string][]Match{}
-	st, err := Run(context.Background(), rg, root, o, func(f File) {
+	st, err := Run(context.Background(), rg, root, o, nil, func(f File) {
 		rel, _ := filepath.Rel(root, f.Path)
 		got[filepath.ToSlash(rel)] = f.Matches
 	})
@@ -104,12 +106,12 @@ func TestRipgrep(t *testing.T) {
 	if !st.Truncated || st.Matches != 2 {
 		t.Errorf("limit: %+v", st)
 	}
-	if _, err := Run(context.Background(), rg, root, Options{Query: "[", Regexp: true}, func(File) {}); err == nil || !strings.Contains(err.Error(), "unclosed character class") {
+	if _, err := Run(context.Background(), rg, root, Options{Query: "[", Regexp: true}, nil, func(File) {}); err == nil || !strings.Contains(err.Error(), "unclosed character class") {
 		t.Errorf("missing regexp error reason: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := Run(ctx, rg, root, Options{Query: "hello"}, func(File) {}); !errors.Is(err, context.Canceled) {
+	if _, err := Run(ctx, rg, root, Options{Query: "hello"}, nil, func(File) {}); !errors.Is(err, context.Canceled) {
 		t.Errorf("canceled: %v", err)
 	}
 }
@@ -120,21 +122,30 @@ func TestListFiles(t *testing.T) {
 		"docs/MainPage.md": "", "node_modules/m/main.js": "",
 	})
 	want := []string{"docs/MainPage.md", "internal/app/main_test.go", "internal/app/model.go", "main.go"}
-	walked, _, err := ListFiles(context.Background(), "", root, 100, nil)
+	walked, _, err := ListFiles(context.Background(), "", root, 100, nil, nil, IgnoreFileOptions{})
 	slices.Sort(walked)
 	if err != nil || !slices.Equal(walked, want) {
 		t.Errorf("walk: %v %v", walked, err)
 	}
 	if rg, err := FindRipgrep(""); err == nil {
-		files, _, err := ListFiles(context.Background(), rg, root, 100, nil)
+		files, _, err := ListFiles(context.Background(), rg, root, 100, nil, nil, IgnoreFileOptions{})
 		slices.Sort(files)
 		if err != nil || !slices.Equal(files, want) {
 			t.Errorf("rg: %v %v", files, err)
 		}
-		files, truncated, _ := ListFiles(context.Background(), rg, root, 2, nil)
+		files, truncated, _ := ListFiles(context.Background(), rg, root, 2, nil, nil, IgnoreFileOptions{})
 		if !truncated || len(files) != 2 {
 			t.Errorf("limit: %v %v", files, truncated)
 		}
+	}
+	files, truncated, err := ListFiles(context.Background(), "", root, 2, nil, nil, IgnoreFileOptions{})
+	if err != nil || !truncated || len(files) != 2 {
+		t.Errorf("walk limit: %v %v %v", files, truncated, err)
+	}
+	// A listing the limit fits is not truncated.
+	files, truncated, err = ListFiles(context.Background(), "", root, 100, nil, nil, IgnoreFileOptions{})
+	if err != nil || truncated || len(files) != len(want) {
+		t.Errorf("walk full: %v %v %v", files, truncated, err)
 	}
 }
 
@@ -172,8 +183,73 @@ func TestListFilesWalkSkipsFolders(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	files, _, err := ListFiles(context.Background(), "", root, 100, func(rel string) bool { return rel == "out" })
+	files, _, err := ListFiles(context.Background(), "", root, 100, func(rel string) bool { return rel == "out" }, nil, IgnoreFileOptions{})
 	if err != nil || !slices.Equal(files, []string{"a.go", "src/out/c.go"}) {
 		t.Fatalf("%q %v", files, err)
+	}
+}
+
+// A case-variant spelling of a workspace ripgrep, and a symlink into the
+// workspace, both name the workspace's bytes on a case-insensitive file
+// system. The finder's exclusion is the launch boundary's identity
+// check, so neither spelling may pass it — the exact-match comparison
+// the exclusion used before caught neither.
+func TestFindRipgrepDeniesWorkspaceVariants(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "MixedCaseRoot")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(root, "rg")
+	if err := os.WriteFile(exe, []byte("workspace program"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// No PATH ripgrep may answer these probes.
+	t.Setenv("PATH", t.TempDir())
+	// verify.sh exports the machine's own rg as SEE_RG for the real-rg
+	// integration tests, and SEE_RG precedes the explicit candidates of
+	// a resolution — the override it exists as. These probes pass their
+	// candidates explicitly, so the ambient override must not answer in
+	// their place.
+	t.Setenv("SEE_RG", "")
+
+	// The exact spelling inside the workspace is denied — the control
+	// that the exclusion still fires for the plain case.
+	if got, err := FindRipgrep(root, exe); !errors.Is(err, proc.ErrUntrustedExecutable) {
+		t.Fatalf("explicit workspace rg not denied: got %q, %v", got, err)
+	}
+
+	variant := filepath.Join(base, "mixedcaseroot", "rg")
+	if _, err := os.Lstat(variant); err != nil {
+		t.Skipf("filesystem is case-sensitive; the case-variant evasion does not exist here: %v", err)
+	}
+	if got, err := FindRipgrep(root, variant); !errors.Is(err, proc.ErrUntrustedExecutable) {
+		t.Fatalf("case-variant workspace rg evaded the exclusion: got %q, %v", got, err)
+	}
+
+	// A symlink outside the workspace pointing inside it resolves to the
+	// workspace's bytes; the user pointing at it gets the typed denial.
+	alias := filepath.Join(t.TempDir(), "rg")
+	if err := os.Symlink(exe, alias); err != nil {
+		t.Skip(err)
+	}
+	if got, err := FindRipgrep(root, alias); !errors.Is(err, proc.ErrUntrustedExecutable) {
+		t.Fatalf("symlink into the workspace evaded the exclusion: got %q, %v", got, err)
+	}
+
+	// A PATH-discovered copy inside the workspace is skipped silently,
+	// not denied: the user never pointed at it.
+	path := filepath.Join(base, "empty-path")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(exe, filepath.Join(path, "rg")); err != nil {
+		t.Skip(err)
+	}
+	t.Setenv("PATH", path)
+	if got, err := FindRipgrep(root); err == nil {
+		t.Fatalf("PATH rg inside the workspace was used: %q", got)
+	} else if errors.Is(err, proc.ErrUntrustedExecutable) {
+		t.Fatalf("a PATH discovery the user never pointed at reported as a denial: %v", err)
 	}
 }

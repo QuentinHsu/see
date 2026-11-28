@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"see/internal/config"
-	"see/internal/workspace"
 	"see/locales"
 	"slices"
 	"strconv"
@@ -229,7 +228,7 @@ func (a *App) newTerminalTabAt(dir string) {
 		tp.nextID++
 		p := &termPane{id: tp.nextID, title: a.shellTitle()}
 		if err := a.newTerm(p, dir); err != nil {
-			a.note(locales.MsgCouldNotStartATerminal()+err.Error(), true)
+			a.fail(locales.MsgCouldNotStartATerminal() + err.Error())
 			return
 		}
 		tab := &termTab{id: tp.nextID, panes: []*termPane{p}, active: p}
@@ -250,7 +249,7 @@ func (a *App) splitTerminal() {
 		tp.nextID++
 		p := &termPane{id: tp.nextID, title: a.shellTitle()}
 		if err := a.newTerm(p, a.paneDir(tab.active)); err != nil {
-			a.note(locales.MsgCouldNotStartATerminal()+err.Error(), true)
+			a.fail(locales.MsgCouldNotStartATerminal() + err.Error())
 			return
 		}
 		at := slices.Index(tab.panes, tab.active) + 1
@@ -409,7 +408,7 @@ func (a *App) closeTerminals() {
 // termDir is where a restored or new terminal starts: dir while it
 // still is a directory of the workspace, the workspace's root else.
 func (a *App) termDir(dir string) string {
-	if dir == "" || a.root == "" || !workspace.Within(a.root, dir) {
+	if dir == "" || a.root == "" || !a.withinWorkspace(dir) {
 		return a.root
 	}
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {

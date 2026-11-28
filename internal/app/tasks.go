@@ -38,7 +38,7 @@ func (a *App) runGoTask(kind tasks.Kind) {
 	if a.root == "" || kind.Args() == nil {
 		return
 	}
-	if !a.cfg.IsTrusted(a.root) {
+	if !a.workspaceTrusted() {
 		a.trustAsk = true
 		a.afterTrust = func() { a.runGoTask(kind) }
 		return
@@ -125,14 +125,14 @@ func (a *App) openTaskLocation(path string, pos editor.Pos) {
 		for _, candidate := range a.quick.files {
 			if strings.HasSuffix("/"+filepath.ToSlash(candidate), suffix) {
 				if matched != "" {
-					a.note(taskMessage("tasksAmbiguousSource"), true)
+					a.fail(taskMessage("tasksAmbiguousSource"))
 					return
 				}
 				matched = filepath.Join(a.root, filepath.FromSlash(candidate))
 			}
 		}
 		if matched == "" {
-			a.note(taskMessage("tasksMissingSource"), true)
+			a.fail(taskMessage("tasksMissingSource"))
 			return
 		}
 		path = matched

@@ -20,7 +20,7 @@ type renamePrompt struct {
 }
 
 func (a *App) beginRename(path string) {
-	if path == a.root || !workspace.Within(a.root, path) || isPlaceholder(path) {
+	if a.isWorkspaceFolder(path) || !a.withinWorkspace(path) || isPlaceholder(path) {
 		return
 	}
 	a.renameEntry = &renamePrompt{path: path, name: filepath.Base(path)}
@@ -28,7 +28,7 @@ func (a *App) beginRename(path string) {
 
 func (a *App) renameField(c *ui.Context, q *renamePrompt) {
 	ui.Column(c).Grow(1).Children(func() {
-		field := ui.TextInput(c, &q.name).Label(locales.MsgRename()+filepath.Base(q.path)).Grow(1).Height(20).Padding(0, 4).FontSize(12).AutoFocus()
+		field := ui.TextInput(c, &q.name).Label(locales.MsgRename()+filepath.Base(q.path)).Grow(1).Height(20).Padding(0, 4).FontSize(12).TextColor(colors(c).Text).AutoFocus()
 		if !q.selected {
 			q.selected = true
 			stem := strings.TrimSuffix(q.name, filepath.Ext(q.name))
@@ -201,7 +201,7 @@ func (a *App) renamed(old, dst string) {
 			if d.buf.Modified() {
 				a.cacheRecovery(d)
 			}
-			if m := a.serverFor(next); m != nil && a.cfg.IsTrusted(a.root) {
+			if m := a.serverFor(next); m != nil && a.workspaceTrusted() {
 				go a.openLanguageDocument(m, a.wsCtx, d, d.uri)
 			}
 		}
@@ -213,7 +213,7 @@ func (a *App) renamed(old, dst string) {
 	}
 	a.bookmarks.Renamed(old, dst)
 	a.refreshDir(filepath.Dir(old))
-	a.quick.files = nil
+	a.quick.files, a.quick.err = nil, nil
 	a.filter.forQuery = ""
 	a.revealInTree(dst)
 	a.refreshGit()

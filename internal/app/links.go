@@ -23,9 +23,16 @@ func (a *App) gitRelPath(path string) (string, bool) {
 	if root == "" {
 		return "", false
 	}
-	if !workspace.Within(root, path) && a.realRoot != "" && workspace.Within(a.root, path) {
-		if sub, err := filepath.Rel(a.root, path); err == nil {
-			path = filepath.Join(a.realRoot, sub)
+	if !workspace.Within(root, path) {
+		workspaceRoot := a.workspaceRootForPath(path)
+		if workspaceRoot != "" {
+			realRoot := workspaceRoot
+			if resolved, err := filepath.EvalSymlinks(workspaceRoot); err == nil {
+				realRoot = resolved
+			}
+			if sub, err := filepath.Rel(workspaceRoot, path); err == nil {
+				path = filepath.Join(realRoot, sub)
+			}
 		}
 	}
 	rel, err := filepath.Rel(root, path)
@@ -51,7 +58,7 @@ func selectedLines(st *editor.State) (first, last int) {
 // workspace's root.
 func (a *App) codeReference(d *doc, st *editor.State) string {
 	first, last := selectedLines(st)
-	ref := fmt.Sprintf("%s:%d", workspace.RelPath(a.root, d.path), first)
+	ref := fmt.Sprintf("%s:%d", a.workspacePath(d.path), first)
 	if last > first {
 		ref += fmt.Sprintf("-%d", last)
 	}
@@ -219,7 +226,7 @@ func (a *App) diffLinkButton(c *ui.Context, v *gitDiffTab, t diffLinkTarget) {
 	})
 	if b.Clicked() {
 		a.services.WriteClipboard(link)
-		a.note(locales.MsgCopiedThe()+host+locales.MsgLink(), false)
+		a.flash(locales.MsgCopiedThe() + host + locales.MsgLink())
 	}
 }
 
@@ -252,13 +259,13 @@ func (a *App) linkItems(menu *ui.Menu, d *doc, st *editor.State) {
 	if menu.Item(editorContextMenuText("editorContextCopyCodeReference", nil)).Chosen() {
 		ref := a.codeReference(d, st)
 		a.services.WriteClipboard(ref)
-		a.note(locales.MsgCopied()+ref+".", false)
+		a.flash(locales.MsgCopied() + ref + ".")
 	}
 	if link := a.webLink(d, st); link != "" {
 		host := hostName(a.git.web)
 		if menu.Item(editorContextMenuText("editorContextCopyHostLink", map[string]any{"host": host})).Chosen() {
 			a.services.WriteClipboard(link)
-			a.note(locales.MsgCopiedThe()+host+locales.MsgLink(), false)
+			a.flash(locales.MsgCopiedThe() + host + locales.MsgLink())
 		}
 		if menu.Item(editorContextMenuText("editorContextOpenOnHost", map[string]any{"host": host})).Chosen() {
 			a.services.OpenURL(link)

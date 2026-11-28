@@ -66,6 +66,7 @@ type previewTransition struct {
 	replaced    string
 	replaceable bool
 	focusSeq    uint64
+	focusEditor bool // the opener asked the keyboard for it, as Open Quickly
 }
 
 // goTo is a place to show in a document: a position of the buffer, or
@@ -204,8 +205,12 @@ func (a *App) finishPendingPreview(d *doc) {
 		g.preview = d.path
 		a.showLoaded(g, d)
 		a.activateIn(g, d.path)
-		if st := g.eds[d.path]; st != nil {
-			a.focusEditor = st
+		if p.focusEditor {
+			if st := g.eds[d.path]; st != nil {
+				a.focusEditor = st
+			}
+		} else {
+			d.previewOpened = true
 		}
 		return
 	}
@@ -216,7 +221,7 @@ func (a *App) failPendingPreview(d *doc) {
 		if p := g.pendingPreview; p != nil && p.doc == d {
 			message := locales.MsgCouldNotOpen() + d.name + ": " + describeErr(d.err)
 			a.cancelPendingPreview(g)
-			a.note(message, true)
+			a.fail(message)
 			return
 		}
 	}
@@ -608,8 +613,9 @@ func (a *App) closeTab(g *group, path string) {
 	}
 	if v := g.diffs[path]; v != nil && v.search != nil && v.search.dirty() {
 		a.activateIn(g, path)
+		// The edit view carries the refusal inline, where the edits it
+		// guards are; a global banner would only repeat it.
 		v.search.note, v.search.noteErr = searchEditText("searchEditCloseDirty"), true
-		a.note(v.search.note, true)
 		return
 	}
 	if isDiffTab(path) {

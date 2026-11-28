@@ -16,6 +16,7 @@ import (
 
 	"see/internal/langserver"
 	"see/internal/lsp"
+	"see/internal/workspace"
 	"see/internal/uri"
 )
 
@@ -49,7 +50,7 @@ const docLinkSettle = 150 * time.Millisecond
 // it is, so no waiting applies.
 func (a *App) syncDocumentLinks(d *doc, st *editor.State) {
 	m := a.serverFor(d.path)
-	served := m != nil && a.cfg.IsTrusted(a.root)
+	served := m != nil && a.workspaceTrusted()
 	if !served && isMarkdown(d.path) && d.buf != nil && !d.lossy && !d.plain && st != nil {
 		// linkVersion cannot mark a parsed version: a fresh buffer's is 0,
 		// as linkVersion's. linkLocal says the parse ran for linkBufVer.
@@ -220,7 +221,7 @@ func (a *App) openDocLinkTarget(d *doc, l *docLink) {
 // not reach.
 func (a *App) resolveAndOpenDocLink(d *doc, l *docLink) {
 	m := a.serverFor(d.path)
-	if m == nil || !a.cfg.IsTrusted(a.root) {
+	if m == nil || !a.workspaceTrusted() {
 		return
 	}
 	gen, seq := a.gen, d.linkSeq
@@ -373,8 +374,13 @@ func (a *App) markdownHeadingLine(path, name string) int {
 	if t := a.docs[path]; t != nil && t.buf != nil {
 		return markdownAnchorLine(t.buf.String(), name)
 	}
+	// The size is checked before reading, not after: a file over the
+	// cap must not be held in memory only to be dropped.
+	if fi, err := os.Stat(path); err != nil || fi.Size() > workspace.MaxSize {
+		return -1
+	}
 	data, err := os.ReadFile(path)
-	if err != nil {
+	if err != nil || len(data) > workspace.MaxSize {
 		return -1
 	}
 	return markdownAnchorLine(string(data), name)

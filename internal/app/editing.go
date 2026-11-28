@@ -12,7 +12,9 @@ import (
 	"strings"
 
 	"github.com/egoist/mygo/ui/editor"
+	"see/internal/atomicfile"
 	"see/internal/config"
+	"see/internal/fileobs"
 	"see/internal/platform"
 	"see/internal/workspace"
 )
@@ -25,9 +27,11 @@ func (a *App) openFileDialog() {
 		a.post.Post(func() {
 			switch {
 			case err != nil:
-				a.note(locales.MsgCouldNotShowTheFileDialog()+err.Error(), true)
+				a.fail(locales.MsgCouldNotShowTheFileDialog() + err.Error())
 			case p != "":
-				if a.root == "" {
+				if a.multiRootWorkspacesEnabled() && strings.EqualFold(filepath.Ext(p), ".code-workspace") {
+					a.openWorkspace(p)
+				} else if a.root == "" {
 					a.showWelcome = false
 					a.openFile(p, nil)
 				} else {
@@ -98,7 +102,7 @@ func (a *App) untitledName() string {
 }
 
 func (a *App) newFileError(msg string) {
-	a.note(msg, true)
+	a.fail(msg)
 	if a.showWelcome {
 		a.welcomeNote = msg
 	}
@@ -118,54 +122,46 @@ func createDraft(path string) error {
 	return nil
 }
 
-// writeFileAtomically writes to a sibling and only moves it into place after
-// the contents are complete and closed. Rename deliberately replaces an
-// existing destination: the native save panel has already asked the user to
-// approve that overwrite.
-func writeFileAtomically(path string, write func(io.Writer) error) error {
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		path = real
-	}
-	dir, base := filepath.Split(path)
-	var tmp *os.File
-	for range 10 {
-		var id [8]byte
-		if _, err := rand.Read(id[:]); err != nil {
-			return err
-		}
-		name := filepath.Join(dir, fmt.Sprintf(".%s.%x.tmp", base, id))
-		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
-		if os.IsExist(err) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		tmp = f
-		break
-	}
-	if tmp == nil {
-		return fmt.Errorf("could not create a temporary file next to %s", path)
-	}
-	name := tmp.Name()
-	defer os.Remove(name)
-	if info, err := os.Stat(path); err == nil {
-		if err := tmp.Chmod(info.Mode().Perm()); err != nil {
-			_ = tmp.Close()
-			return err
-		}
-	}
-	err := write(tmp)
-	if err == nil {
-		err = tmp.Sync()
-	}
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
-	}
+// writeFileIfUnchanged publishes through atomicfile like writeFileAtomically
+// and additionally guards the publish with the document's save condition:
+// unless overwrite is explicit, the target is replaced only while its
+// content still matches expectation — digest-strength, built from the
+// bytes the buffer was read from. The condition evaluates inside the
+// publish boundary, after the staging file is durable and closed and
+// immediately before the rename. POSIX cannot compare-and-rename in one
+// step, so this is best-effort conflict detection whose race window is
+// the rename boundary (documented per REQ-COND-070), never an atomic
+// compare-and-publish — and it shrinks the window from the entire
+// staging write to that boundary. Both ends of the condition are
+// digest-carrying observations: the re-observation is ObserveContent,
+// never ObservePath, so a weakened comparison cannot assemble silently.
+func writeFileIfUnchanged(path string, expectation fileobs.Observation, overwrite bool, write func(io.Writer) error) error {
+	s, err := atomicfile.Begin(path)
 	if err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	defer func() { _ = s.Abort() }()
+	if err := write(s); err != nil {
+		return err
+	}
+	if overwrite {
+		return s.Commit()
+	}
+	return s.CommitIf(func() error {
+		current, err := fileobs.ObserveContent(fileobs.SourceRead, path)
+		if err != nil {
+			return err
+		}
+		return fileobs.Check(expectation, current)
+	})
+}
+
+// writeFileAtomically writes to a sibling and only moves it into place after
+// the contents are complete and durable. Rename deliberately replaces an
+// existing destination: the native save panel has already asked the user to
+// approve that overwrite.
+func writeFileAtomically(path string, write func(io.Writer) error) error {
+	return atomicfile.WriteFile(path, write)
 }
 
 func draftDir() (string, error) {
@@ -191,12 +187,12 @@ func (a *App) cacheDraft(d *doc) {
 			return
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-			post(func() { a.note(locales.MsgCouldNotCacheUnsavedFile()+err.Error(), true) })
+			post(func() { a.fail(locales.MsgCouldNotCacheUnsavedFile() + err.Error()) })
 			return
 		}
 		tmp, err := os.CreateTemp(filepath.Dir(path), ".draft-")
 		if err != nil {
-			post(func() { a.note(locales.MsgCouldNotCacheUnsavedFile()+err.Error(), true) })
+			post(func() { a.fail(locales.MsgCouldNotCacheUnsavedFile() + err.Error()) })
 			return
 		}
 		name := tmp.Name()
@@ -213,7 +209,7 @@ func (a *App) cacheDraft(d *doc) {
 		}
 		post(func() {
 			if err != nil {
-				a.note(locales.MsgCouldNotCacheUnsavedFile()+err.Error(), true)
+				a.fail(locales.MsgCouldNotCacheUnsavedFile() + err.Error())
 			}
 		})
 	}()
@@ -285,7 +281,7 @@ func (a *App) guardDirty(docs []*doc, proceed func()) bool {
 			case errors.Is(err, platform.ErrNoDialog):
 				q.inWindow = true
 			case err != nil:
-				a.note(locales.MsgCouldNotShowTheConfirmation()+err.Error(), true)
+				a.fail(locales.MsgCouldNotShowTheConfirmation() + err.Error())
 				a.confirm = nil
 			default:
 				if choice < 0 || choice >= len(q.actions) {
@@ -361,19 +357,19 @@ func (a *App) saveUntitled(d *doc, done func(bool)) {
 			if err != nil || path == "" {
 				d.saving = false
 				if err != nil {
-					a.note(locales.MsgCouldNotShowTheSaveDialog()+err.Error(), true)
+					a.fail(locales.MsgCouldNotShowTheSaveDialog() + err.Error())
 				}
 				done(false)
 				return
 			}
-			path = workspace.DocPath(a.root, a.realRoot, path)
+			path = a.docPath(path)
 			alreadyOpen := a.docs[path]
 			if alreadyOpen == nil && a.root == "" {
 				alreadyOpen = standaloneDocForPath(a, path)
 			}
 			if alreadyOpen != nil {
 				d.saving = false
-				a.note(locales.MsgThatFileIsAlreadyOpen(), true)
+				a.fail(locales.MsgThatFileIsAlreadyOpen())
 				done(false)
 				return
 			}
@@ -381,102 +377,137 @@ func (a *App) saveUntitled(d *doc, done func(bool)) {
 			if claimed && !reserveStandalonePath(a, d, path) {
 				d.saving = false
 				a.host.RevealOpenFile(path)
-				a.note(locales.MsgThatFileIsAlreadyOpen(), true)
+				a.fail(locales.MsgThatFileIsAlreadyOpen())
 				done(false)
 				return
 			}
-			snap := d.buf.Snapshot()
-			go func() {
-				err := writeFileAtomically(path, func(w io.Writer) error {
-					_, err := snap.WriteTo(w)
-					return err
-				})
-				a.post.Post(func() {
-					if a.gen != gen || a.docs[d.path] != d {
-						if claimed {
-							releaseStandalonePath(a, d, path)
+			// write is the save's write, its own step so the Retry of a
+			// failed one runs it again, without the dialog another
+			// saveUntitled would show. var, not :=, as the closure
+			// refers to itself in the failure report.
+			var write func()
+			write = func() {
+				snap := d.buf.Snapshot()
+				go func() {
+					err := writeFileAtomically(path, func(w io.Writer) error {
+						_, err := snap.WriteTo(w)
+						return err
+					})
+					a.post.Post(func() {
+						if a.gen != gen || a.docs[d.path] != d {
+							if claimed {
+								releaseStandalonePath(a, d, path)
+							}
+							return
 						}
-						return
-					}
-					d.saving = false
-					if err != nil {
-						if claimed {
-							releaseStandalonePath(a, d, path)
+						d.saving = false
+						if err != nil {
+							if claimed {
+								releaseStandalonePath(a, d, path)
+							}
+							msg := locales.MsgCouldNotSaveFile() + err.Error()
+							if d.buf != nil {
+								a.failAction("save:"+d.path, msg, action{locales.Retry(), write})
+							} else {
+								a.fail(msg)
+							}
+							done(false)
+							return
 						}
-						a.note(locales.MsgCouldNotSaveFile()+err.Error(), true)
-						done(false)
-						return
-					}
-					if claimed {
-						finishStandalonePathWrite(a, d, path)
-					}
-					old := d.path
-					removeDraft(d)
-					delete(a.docs, old)
-					d.path, d.uri, d.name, d.untitled, d.cache = path, uriOf(path), filepath.Base(path), false, nil
-					d.diskText = snap.String()
-					if d.buf.Version() == snap.Version() {
-						d.buf.MarkSaved()
-					} else {
-						a.cacheRecovery(d)
-					}
-					a.setDocumentLanguage(d)
-					if fi, e := os.Stat(path); e == nil {
-						d.stamp = fileStamp{fi.Size(), fi.ModTime()}
-					}
-					a.docs[path] = d
-					d.blameKey = ""
-					a.syncBlame(d)
-					for _, g := range a.groups() {
-						for i, p := range g.order {
-							if p == old {
-								g.order[i] = path
+						a.resolveFeedback("save:" + d.path)
+						if claimed {
+							finishStandalonePathWrite(a, d, path)
+						}
+						old := d.path
+						removeDraft(d)
+						delete(a.docs, old)
+						d.path, d.uri, d.name, d.untitled, d.cache = path, uriOf(path), filepath.Base(path), false, nil
+						d.diskText = snap.String()
+						expectOnDisk(d)
+						if d.buf.Version() == snap.Version() {
+							d.buf.MarkSaved()
+						} else {
+							a.cacheRecovery(d)
+						}
+						a.setDocumentLanguage(d)
+						if fi, e := os.Stat(path); e == nil {
+							d.stamp = fileStamp{fi.Size(), fi.ModTime()}
+						}
+						a.docs[path] = d
+						d.blameKey = ""
+						a.syncBlame(d)
+						for _, g := range a.groups() {
+							for i, p := range g.order {
+								if p == old {
+									g.order[i] = path
+								}
+							}
+							for i, p := range g.mru {
+								if p == old {
+									g.mru[i] = path
+								}
+							}
+							if g.active == old {
+								g.active = path
+							}
+							if g.preview == old {
+								g.preview = path
+							}
+							if st := g.eds[old]; st != nil {
+								delete(g.eds, old)
+								delete(g.minimaps, old)
+								g.eds[path] = st
+								st.Label = d.name
+								a.applyEditorPrefs(st)
+							}
+							if p, ok := g.pending[old]; ok {
+								delete(g.pending, old)
+								g.pending[path] = p
 							}
 						}
-						for i, p := range g.mru {
-							if p == old {
-								g.mru[i] = path
+						if m := a.serverFor(path); m != nil {
+							if a.workspaceTrusted() {
+								go a.openLanguageDocument(m, a.wsCtx, d, d.uri)
+							} else if !a.trustDismissed {
+								a.trustAsk = true
 							}
 						}
-						if g.active == old {
-							g.active = path
-						}
-						if g.preview == old {
-							g.preview = path
-						}
-						if st := g.eds[old]; st != nil {
-							delete(g.eds, old)
-							delete(g.minimaps, old)
-							g.eds[path] = st
-							st.Label = d.name
-							a.applyEditorPrefs(st)
-						}
-						if p, ok := g.pending[old]; ok {
-							delete(g.pending, old)
-							g.pending[path] = p
-						}
-					}
-					if m := a.serverFor(path); m != nil {
-						if a.cfg.IsTrusted(a.root) {
-							go a.openLanguageDocument(m, a.wsCtx, d, d.uri)
-						} else if !a.trustDismissed {
-							a.trustAsk = true
-						}
-					}
-					a.refreshDir(filepath.Dir(path))
-					a.saveConfig()
-					a.note(locales.MsgSaved()+d.name, false)
-					done(!d.buf.Modified())
-				})
-			}()
+						a.refreshDir(filepath.Dir(path))
+						a.saveConfig()
+						a.flash(locales.MsgSaved() + d.name)
+						done(!d.buf.Modified())
+					})
+				}()
+			}
+			write()
 		})
 	}()
+}
+
+// expectationBytes are the on-disk bytes a document's text represents:
+// the decoded text with its BOM prepended when it had one. The save
+// condition compares content, so the expectation is built from these
+// bytes rather than re-observed — re-observing would race the file
+// instead of measuring what the buffer was read from.
+func expectationBytes(text string, bom bool) []byte {
+	if !bom {
+		return []byte(text)
+	}
+	return append([]byte{0xef, 0xbb, 0xbf}, text...)
+}
+
+// expectOnDisk rebuilds the document's save condition: the digest of the
+// bytes last read from disk. The condition is content-strength by
+// construction — digest only, never size+mtime — so an identical-content
+// rewrite never conflicts and a same-length replacement always does.
+func expectOnDisk(d *doc) {
+	d.expectation = fileobs.ExpectContent(fileobs.SourceRead, d.path, expectationBytes(d.diskText, d.bom))
 }
 
 // saveDoc checks the last-read disk contents before writing, including the BOM.
 func (a *App) saveDoc(d *doc, overwrite bool) bool {
 	if a.git.resolvingPath != "" && a.git.resolvingPath == d.path {
-		a.note(gitConflictText("gitConflictSaving"), false)
+		a.flash(gitConflictText("gitConflictSaving"))
 		return false
 	}
 	if d.buf == nil || d.lossy {
@@ -485,29 +516,51 @@ func (a *App) saveDoc(d *doc, overwrite bool) bool {
 	if !d.buf.Modified() && !overwrite {
 		return true
 	}
-	current, err := os.ReadFile(d.path)
-	if err != nil && !os.IsNotExist(err) {
-		a.note(locales.MsgCouldNotSave()+d.name+": "+err.Error(), true)
-		return false
-	}
-	expected := []byte(d.diskText)
-	if d.bom {
-		expected = append([]byte{0xef, 0xbb, 0xbf}, expected...)
-	}
-	if !overwrite && (err != nil || !bytes.Equal(current, expected)) {
-		d.conflict = true
-		a.note(locales.MsgTheFileChangedOnDiskReviewItBefore(), true)
-		return false
+	if !overwrite {
+		// The cheap pre-check skips staging for the common conflict: it is
+		// a courtesy, never the condition. The condition is evaluated
+		// again inside the publish boundary below, so a file passing here
+		// still cannot be silently overwritten when it changes mid-write.
+		current, err := os.ReadFile(d.path)
+		if err != nil && !os.IsNotExist(err) {
+			a.failKeyed("save:"+d.path, locales.MsgCouldNotSave()+d.name+": "+err.Error(), nil)
+			return false
+		}
+		if err != nil || !bytes.Equal(current, expectationBytes(d.diskText, d.bom)) {
+			d.conflict = true
+			a.reportConflict(d)
+			return false
+		}
 	}
 	var out bytes.Buffer
 	if d.bom {
 		out.Write([]byte{0xef, 0xbb, 0xbf})
 	}
+	var err error
 	if _, err = d.buf.WriteTo(&out); err == nil {
-		err = os.WriteFile(d.path, out.Bytes(), 0666)
+		// The publish is conditional: the target is replaced only while
+		// it still holds the bytes this buffer was read from. The
+		// condition evaluates after the staging file is durable and
+		// closed, immediately before the rename — the window in which an
+		// external write is silently overwritten shrinks from the entire
+		// staging write to the rename boundary, which POSIX cannot close
+		// for regular files. The re-observation is ObserveContent, never
+		// ObservePath: a digest-less observation here is incomparable
+		// with the content-strength expectation, which would be a wiring
+		// bug — ErrIncomparableIdentity surfaces as a save failure, and
+		// must never be "fixed" by weakening the expectation.
+		err = writeFileIfUnchanged(d.path, d.expectation, overwrite, func(w io.Writer) error {
+			_, err := w.Write(out.Bytes())
+			return err
+		})
 	}
 	if err != nil {
-		a.note(locales.MsgCouldNotSave()+d.name+": "+err.Error(), true)
+		if errors.Is(err, fileobs.ErrConditionMismatch) {
+			d.conflict = true
+			a.reportConflict(d)
+			return false
+		}
+		a.failAction("save:"+d.path, locales.MsgCouldNotSave()+d.name+": "+err.Error(), action{locales.Retry(), func() { a.saveDoc(d, overwrite) }})
 		return false
 	}
 	d.seq++ // an older asynchronous read must not replace the saved text
@@ -519,6 +572,7 @@ func (a *App) saveDoc(d *doc, overwrite bool) bool {
 	if d.bom {
 		d.diskText = d.diskText[3:]
 	}
+	expectOnDisk(d)
 	if fi, err := os.Stat(d.path); err == nil {
 		d.stamp = fileStamp{fi.Size(), fi.ModTime()}
 	}
@@ -529,6 +583,38 @@ func (a *App) saveDoc(d *doc, overwrite bool) bool {
 		// A clean saved file is no longer crash-recovery state.
 		a.saveConfig()
 	}
-	a.note(locales.MsgSaved()+d.name, false)
+	a.resolveFeedback("save:" + d.path)
+	a.resolveFeedback("conflict:" + d.path)
+	a.flash(locales.MsgSaved() + d.name)
 	return true
+}
+
+// reportConflict records the file-changed-on-disk conflict the save
+// just found, the cheap pre-check's or the publish boundary's: the
+// editor of the file carries it as its own banner while it shows, so
+// the feedback one reports it only where that one cannot be seen, as a
+// file Save All could not write in another group or behind a tab.
+// Review goes to the file, where the editor banner's Overwrite resolves
+// it. The key is the same however the conflict was found, so a conflict
+// surfacing twice — pre-check, then publish — is one error, and the
+// save that goes through resolves both.
+func (a *App) reportConflict(d *doc) {
+	if a.conflictBannerVisible(d) {
+		return
+	}
+	a.failAction("conflict:"+d.path, locales.MsgTheFileChangedOnDiskReviewItBefore(), action{locales.Review(), func() {
+		a.openFile(d.path, nil)
+	}})
+}
+
+// conflictBannerVisible reports whether d's file-changed-on-disk banner
+// can show: its document is the active tab of some group, the only place
+// the editor area builds one.
+func (a *App) conflictBannerVisible(d *doc) bool {
+	for _, g := range a.groups() {
+		if tabPath(g.active) == d.path {
+			return true
+		}
+	}
+	return false
 }

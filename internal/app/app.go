@@ -25,10 +25,13 @@ import (
 
 	"see/internal/config"
 	"see/internal/filenesting"
+	"see/internal/fileobs"
 	"see/internal/git"
 	"see/internal/localhistory"
 	"see/internal/lsp"
 	"see/internal/nav"
+	"see/internal/operr"
+	"see/internal/proc"
 	"see/internal/uri"
 	"see/internal/workspace"
 
@@ -81,6 +84,7 @@ type App struct {
 	trustChanged        func()
 	editorPrefsChanged  func()
 	gitDiscoveryChanged func()
+	vibrancyChanged     func()
 	host                platform.Desktop // the window and the desktop around it
 	windowWidth         int
 	windowHeight        int
@@ -92,27 +96,40 @@ type App struct {
 	logf func(string, ...any)
 
 	// The workspace.
-	root     string // as the user opened it
-	realRoot string // with symlinks resolved, as servers may report it
-	gen      int    // bumped when the workspace changes; late results of an old one are dropped
-	wsCtx    context.Context
-	wsCancel context.CancelFunc
-	dirs     map[string]*dirState
-	tree     ui.OutlineState[string]
-	outline  outlineState
-	calls    calls
-	treeRow  int
-	reveal   string // a path to choose in the tree once its row shows
-	filter   treeFilter
-	watchErr error
-	watching bool
-	ignored  *git.Ignored // what git ignores in the workspace, dimmed in the tree and not watched
-	git      gitState
+	root                string // the first folder root
+	realRoot            string // with symlinks resolved, as servers may report it
+	workspaceID         string // folder or .code-workspace path used for saved state
+	workspaceFolders    []workspace.Folder
+	workspaceChanged    bool
+	workspaceSettings   workspace.Settings
+	workspaceRootsEpoch uint64
+	gen                 int // bumped when the workspace changes; late results of an old one are dropped
+	wsCtx               context.Context
+	wsCancel            context.CancelFunc
+	dirs                map[string]*dirState
+	tree                ui.OutlineState[string]
+	outline             outlineState
+	calls               calls
+	treeRow             int
+	reveal              string // a path to choose in the tree once its row shows
+	filter              treeFilter
+	watchErr            error
+	watching            bool
+	watchCancels        map[string]context.CancelFunc
+	workspaceFileCancel context.CancelFunc
+	ignored             map[string]*git.Ignored // what Git ignores under each folder root
+	git                 gitState
 
 	// Documents, by path, and the editor groups showing them.
 	docs              map[string]*doc
 	localHistoryStore *localhistory.Store
 	localHistoryErr   error
+	// localHistoryWrites counts the captures whose store writes are in
+	// flight. Tests drain it before their temporary directories go away:
+	// a write landing in the teardown window can recreate a removed
+	// directory, which the harness cannot see and the cleanup cannot
+	// remove.
+	localHistoryWrites sync.WaitGroup
 	layout            *layout
 	maximized         *group
 	recents           []string // the files activated lately, across groups, most recent last
@@ -188,8 +205,7 @@ type App struct {
 	trustDismissed bool
 	trustAsk       bool   // asking whether to trust the workspace
 	afterTrust     func() // what to do once trusted
-	notice         string // the last message for the user
-	noticeError    bool
+	feedback       feedbackState
 
 	symbolHighlights symbolHighlightState
 
@@ -279,6 +295,8 @@ type doc struct {
 	markdownCached  bool
 	hex             *hexState
 
+	previewOpened     bool // previewed open: the editor's birth does not take the keyboard
+	focusOnLoad       bool // the opener asked the keyboard once its editor exists
 	loading           bool
 	loadingVisible    bool
 	loadingSeq        uint64
@@ -293,6 +311,7 @@ type doc struct {
 	lossy             bool      // invalid UTF-8 shown with replacement characters
 	bom               bool
 	diskText          string
+	expectation       fileobs.Observation // the on-disk bytes this buffer saves against
 	conflict          bool
 	lspVersion        uint64
 	diagnostics       []editor.Diagnostic
@@ -415,9 +434,6 @@ func newApp(cfg *config.Config) *App {
 
 func uriOf(path string) string { return uri.FromPath(path) }
 
-// note shows a message in the activity view.
-func (a *App) note(msg string, isErr bool) { a.notice, a.noticeError = msg, isErr }
-
 // activePath is the focused group's active document.
 func (a *App) activePath() string {
 	if isDiffTab(a.focus.active) {
@@ -444,7 +460,7 @@ func (a *App) openFolderDialog() {
 		a.post.Post(func() {
 			switch {
 			case err != nil:
-				a.note(locales.MsgCouldNotShowTheFolderDialog()+err.Error(), true)
+				a.fail(locales.MsgCouldNotShowTheFolderDialog() + err.Error())
 			case p != "":
 				a.openProject(p)
 			}
@@ -452,11 +468,263 @@ func (a *App) openFolderDialog() {
 	}()
 }
 
+func (a *App) addWorkspaceFolderDialog() {
+	if a.find.replacing || !a.multiRootWorkspacesEnabled() {
+		return
+	}
+	pick := a.host.PickFolder
+	go func() {
+		p, err := pick()
+		a.post.Post(func() {
+			switch {
+			case err != nil:
+				a.fail(locales.MsgCouldNotShowTheFolderDialog() + err.Error())
+			case p != "":
+				a.addWorkspaceFolder(p)
+			}
+		})
+	}()
+}
+
+func (a *App) addWorkspaceFolder(path string) {
+	if a.find.replacing || !a.multiRootWorkspacesEnabled() {
+		return
+	}
+	root, err := workspace.CanonicalRoot(path)
+	if err != nil {
+		a.fail(locales.MsgCouldNotOpen() + path + ": " + describeErr(err))
+		return
+	}
+	var folders []workspace.Folder
+	if a.isCodeWorkspace() {
+		folders, err = workspace.AddCodeWorkspaceFolder(a.workspaceID, workspace.Folder{Path: root, Name: filepath.Base(root)})
+		if err != nil {
+			a.fail(workspaceUpdateFailed(a.workspaceID, err))
+			return
+		}
+	} else {
+		for _, folder := range a.workspaceFolders {
+			if folder.Path == root {
+				return
+			}
+		}
+		workspaceFile, created, convertErr := a.plainWorkspaceFile(a.workspaceFolders)
+		if convertErr != nil {
+			a.fail(locales.MsgCouldNotOpen() + workspaceFile + ": " + describeErr(convertErr))
+			return
+		}
+		folders = nil
+		for _, existing := range a.workspaceFolders {
+			folders, err = workspace.AddCodeWorkspaceFolder(workspaceFile, existing)
+			if err != nil {
+				break
+			}
+		}
+		if err == nil {
+			folders, err = workspace.AddCodeWorkspaceFolder(workspaceFile, workspace.Folder{Path: root, Name: filepath.Base(root)})
+		}
+		if err != nil {
+			if created {
+				_ = os.Remove(workspaceFile)
+			}
+			a.fail(workspaceUpdateFailed(workspaceFile, err))
+			return
+		}
+		a.adoptCodeWorkspace(workspaceFile)
+	}
+	a.syncWorkspaceFolders(folders)
+}
+
+// plainWorkspaceFile chooses or creates the VS Code workspace file a plain
+// folder becomes when it gains a second root. An existing sibling that already
+// contains the first root is reused; unrelated files are never overwritten.
+func (a *App) plainWorkspaceFile(folders []workspace.Folder) (string, bool, error) {
+	if len(a.workspaceFolders) == 0 {
+		return "", false, errors.New("workspace has no folders")
+	}
+	first := a.workspaceFolders[0]
+	base := filepath.Base(first.Path)
+	for i := 0; i < 100; i++ {
+		name := base
+		if i > 0 {
+			name += fmt.Sprintf("-%d", i+1)
+		}
+		candidate := filepath.Join(filepath.Dir(first.Path), name+".code-workspace")
+		if _, err := os.Stat(candidate); errors.Is(err, fs.ErrNotExist) {
+			if err := workspace.WriteNewCodeWorkspace(candidate, folders); err != nil {
+				return candidate, false, err
+			}
+			return candidate, true, nil
+		}
+		parsed, err := workspace.ReadCodeWorkspace(candidate)
+		if err == nil {
+			for _, folder := range parsed.Folders {
+				if folder.Path == first.Path {
+					return candidate, false, nil
+				}
+			}
+		}
+	}
+	return "", false, errors.New("no available workspace file name")
+}
+
+func (a *App) adoptCodeWorkspace(workspaceFile string) {
+	if a.workspaceID == workspaceFile {
+		return
+	}
+	old := a.workspaceID
+	a.workspaceID = workspaceFile
+	a.workspaceChanged = false
+	if a.cfg.Workspaces != nil {
+		if session, ok := a.cfg.Workspaces[old]; ok {
+			if _, exists := a.cfg.Workspaces[workspaceFile]; !exists {
+				session.Folders = nil
+				a.cfg.Workspaces[workspaceFile] = session
+			}
+		}
+	}
+	a.cfg.AddRecent(workspaceFile)
+	a.cfg.LastWorkspace = workspaceFile
+	if parsed, err := workspace.ReadCodeWorkspace(workspaceFile); err == nil {
+		a.applyWorkspaceSettings(parsed.Settings)
+	}
+	a.host.SetTitle(a.workspaceTitle())
+	a.startWorkspaceFileWatch()
+}
+
+func (a *App) removeWorkspaceFolder(path string) {
+	if a.find.replacing || len(a.workspaceFolders) <= 1 || !a.isWorkspaceFolder(path) {
+		return
+	}
+	var folders []workspace.Folder
+	if a.isCodeWorkspace() {
+		var err error
+		folders, err = workspace.RemoveCodeWorkspaceFolder(a.workspaceID, path)
+		if err != nil {
+			a.fail(workspaceUpdateFailed(a.workspaceID, err))
+			return
+		}
+	} else {
+		for _, folder := range a.workspaceFolders {
+			if folder.Path != path {
+				folders = append(folders, folder)
+			}
+		}
+	}
+	a.syncWorkspaceFolders(folders)
+}
+
+func (a *App) isCodeWorkspace() bool {
+	return strings.EqualFold(filepath.Ext(a.workspaceID), ".code-workspace")
+}
+
+func (a *App) syncWorkspaceFolders(folders []workspace.Folder) {
+	if slices.EqualFunc(a.workspaceFolders, folders, func(a, b workspace.Folder) bool { return a == b }) {
+		return
+	}
+	previous := make(map[string]bool, len(a.workspaceFolders))
+	next := make(map[string]bool, len(folders))
+	for _, folder := range a.workspaceFolders {
+		previous[folder.Path] = true
+	}
+	for _, folder := range folders {
+		next[folder.Path] = true
+	}
+	for root := range previous {
+		if next[root] {
+			continue
+		}
+		if cancel := a.watchCancels[root]; cancel != nil {
+			cancel()
+			delete(a.watchCancels, root)
+		}
+		delete(a.ignored, root)
+		a.tree.Open.Remove(root)
+	}
+	a.workspaceFolders = slices.Clone(folders)
+	a.workspaceChanged = !a.isCodeWorkspace()
+	a.root = folders[0].Path
+	a.realRoot = a.root
+	if resolved, err := filepath.EvalSymlinks(a.root); err == nil {
+		a.realRoot = resolved
+	}
+	for dir := range a.dirs {
+		if a.workspaceRootForPath(dir) == "" {
+			delete(a.dirs, dir)
+		}
+	}
+	if a.ignored == nil {
+		a.ignored = map[string]*git.Ignored{}
+	}
+	for _, folder := range folders {
+		if !previous[folder.Path] {
+			a.loadDir(folder.Path)
+			a.startWatchFolder(folder.Path)
+		}
+		if len(folders) > 1 || a.isCodeWorkspace() {
+			a.tree.Open.Add(folder.Path)
+		}
+	}
+	a.workspaceRootsEpoch++
+	a.invalidateQuickFiles()
+	a.filter.forQuery, a.filter.tree, a.filter.roots = "", nil, nil
+	a.runFind()
+	a.refreshGitDiscovery()
+	if !a.workspaceTrusted() {
+		a.enforceTrust()
+	} else {
+		a.stopLanguageServers()
+		a.initLanguageServers()
+		a.openServerDocuments(nil)
+		if a.navigator == navProblems && !a.sidebarOff {
+			a.problems.started, a.problems.starting = false, 0
+			a.startProjectDiagnostics()
+		}
+	}
+	a.saveConfig()
+}
+
 // openWorkspace closes the current workspace and opens dir: its first
 // level of entries loads in the background, and nothing else is read
 // until the user opens it.
 func (a *App) openWorkspace(dir string) {
-	root, err := workspace.CanonicalRoot(dir)
+	workspaceID, err := filepath.Abs(dir)
+	if err != nil {
+		a.welcomeNote = locales.Catalog.Format(i18n.Locale(), "msgCouldNotOpenSPath", map[string]any{"path": dir, "reason": describeErr(err)})
+		return
+	}
+	workspaceID = filepath.Clean(workspaceID)
+	var folders []workspace.Folder
+	var settings workspace.Settings
+	isCodeWorkspace := strings.EqualFold(filepath.Ext(workspaceID), ".code-workspace")
+	if isCodeWorkspace {
+		if !a.multiRootWorkspacesEnabled() {
+			err = errors.New(locales.WorkspaceRequiresBeta())
+		} else {
+			var parsed *workspace.CodeWorkspace
+			parsed, err = workspace.ReadCodeWorkspace(workspaceID)
+			if err == nil {
+				folders, settings = parsed.Folders, parsed.Settings
+			}
+		}
+	} else {
+		var root string
+		root, err = workspace.CanonicalRoot(workspaceID)
+		if err == nil {
+			workspaceID = root
+			folders = []workspace.Folder{{Path: root, Name: filepath.Base(root)}}
+		}
+	}
+	if err == nil && !isCodeWorkspace {
+		if saved := a.cfg.Workspaces[workspaceID]; a.multiRootWorkspacesEnabled() && len(saved.Folders) > 0 {
+			if persisted, folderErr := loadSavedWorkspaceFolders(saved.Folders); folderErr == nil && len(persisted) > 0 {
+				folders = persisted
+			}
+		}
+		if len(folders) == 0 {
+			err = errors.New("workspace has no folders")
+		}
+	}
 	if err != nil {
 		a.welcomeNote = locales.Catalog.Format(i18n.Locale(), "msgCouldNotOpenSPath", map[string]any{"path": dir, "reason": describeErr(err)})
 		if errors.Is(err, fs.ErrNotExist) && slices.Contains(a.cfg.Recent, dir) {
@@ -465,41 +733,54 @@ func (a *App) openWorkspace(dir string) {
 		}
 		return
 	}
-	if a.guardDirty(a.dirtyDocs(), func() { a.openWorkspace(root) }) {
+	if a.guardDirty(a.dirtyDocs(), func() { a.openWorkspace(workspaceID) }) {
 		return
 	}
 	a.closeWorkspace()
-	a.root = root
-	a.realRoot = root
-	if r, err := filepath.EvalSymlinks(root); err == nil {
+	a.workspaceID = workspaceID
+	a.workspaceFolders = folders
+	a.workspaceSettings = normalizedWorkspaceSettings(settings)
+	a.workspaceChanged = !isCodeWorkspace && a.multiRootWorkspacesEnabled() && len(a.cfg.Workspaces[workspaceID].Folders) > 0
+	a.workspaceRootsEpoch++
+	a.invalidateQuickFiles()
+	a.root = folders[0].Path
+	a.realRoot = a.root
+	if r, err := filepath.EvalSymlinks(a.root); err == nil {
 		a.realRoot = r
 	}
 	a.welcomeNote = ""
 	a.showWelcome = false
 	a.wsCtx, a.wsCancel = context.WithCancel(context.Background())
 	a.initLanguageServers()
-	a.loadDir(root)
+	for _, folder := range folders {
+		a.loadDir(folder.Path)
+		if len(folders) > 1 || a.isCodeWorkspace() {
+			a.tree.Open.Add(folder.Path)
+		}
+	}
 	a.startWatch()
 	a.startGit()
 	a.restoreSession()
 	if a.navigator == navProblems && !a.sidebarOff {
 		a.startProjectDiagnostics()
 	}
-	a.windowWidth, a.windowHeight = config.WorkspaceSize(a.cfg.Workspaces[root])
+	a.windowWidth, a.windowHeight = config.WorkspaceSize(a.cfg.Workspaces[workspaceID])
 	a.host.SetWorkspaceSize(a.windowWidth, a.windowHeight)
-	a.cfg.LastWorkspace = root
-	a.cfg.AddRecent(root)
+	a.cfg.LastWorkspace = workspaceID
+	a.cfg.AddRecent(workspaceID)
 	a.saveConfig()
-	a.host.SetTitle(filepath.Base(root))
+	a.host.SetTitle(a.workspaceTitle())
 }
 
 func (a *App) initLanguageServers() {
 	a.serverEpoch++
 	gen, epoch, root := a.gen, a.serverEpoch, a.root
+	folders := lspWorkspaceFolders(a.workspaceFolders)
 	a.lsp = langserver.New(langserver.Options{
-		Name:  "gopls",
-		Root:  root,
-		Start: a.startLSP(a.serverLog("gopls")),
+		Name:    "gopls",
+		Root:    root,
+		Folders: folders,
+		Start:   a.startLSP(a.serverLog("gopls")),
 		OnState: func(s langserver.State, err error) {
 			a.post.Post(func() {
 				if a.gen == gen && a.serverEpoch == epoch {
@@ -513,7 +794,7 @@ func (a *App) initLanguageServers() {
 	})
 	a.wireApplyEdit(a.lsp)
 	a.resetTypeScriptServer()
-	a.clangLSP = languages.NewClangdServer(root, func(s langserver.State, err error) {
+	a.clangLSP = languages.NewClangdServer(root, folders, func(s langserver.State, err error) {
 		a.post.Post(func() {
 			if a.gen == gen && a.serverEpoch == epoch {
 				a.clangState, a.clangErr = s, err
@@ -521,7 +802,7 @@ func (a *App) initLanguageServers() {
 			}
 		})
 	}, a.diagnosticsHandler(gen), a.serverLog("clangd"))
-	a.cmakeLSP = languages.NewCMakeServer(root, func(s langserver.State, err error) {
+	a.cmakeLSP = languages.NewCMakeServer(root, folders, func(s langserver.State, err error) {
 		a.post.Post(func() {
 			if a.gen == gen && a.serverEpoch == epoch {
 				a.cmakeState, a.cmakeErr = s, err
@@ -541,7 +822,7 @@ func (a *App) initLanguageServers() {
 	for i, spec := range a.customLSPSpecs {
 		a.customCovers[i] = languages.ConfiguredCovers(spec)
 		idx, name := i, spec.Name
-		a.customLSPs[i] = languages.NewConfiguredServer(spec, root, func(s langserver.State, err error) {
+		a.customLSPs[i] = languages.NewConfiguredServer(spec, root, folders, func(s langserver.State, err error) {
 			a.post.Post(func() {
 				if a.gen == gen && a.serverEpoch == epoch {
 					a.customStates[idx] = struct {
@@ -572,6 +853,8 @@ func (a *App) closeWorkspace() {
 		a.cancelPendingPreview(g)
 	}
 	a.gen++
+	a.workspaceRootsEpoch++
+	a.invalidateQuickFiles()
 	if a.wsCancel != nil {
 		a.wsCancel()
 	}
@@ -587,7 +870,10 @@ func (a *App) closeWorkspace() {
 		}
 	}
 	a.stopLanguageServers()
-	a.root, a.realRoot = "", ""
+	a.root, a.realRoot, a.workspaceID = "", "", ""
+	a.workspaceFolders, a.workspaceChanged = nil, false
+	a.workspaceSettings = workspace.Settings{}
+	a.watchCancels = nil
 	a.recents = nil
 	a.dirs = map[string]*dirState{}
 	a.tree = ui.OutlineState[string]{}
@@ -611,7 +897,7 @@ func (a *App) closeWorkspace() {
 	a.watchErr, a.watching = nil, false
 	a.git = gitState{}
 	a.ignored = nil
-	a.notice = ""
+	a.feedback = feedbackState{}
 	a.hover = hoverState{}
 	a.find.reset()
 	a.quick = quickOpen{}
@@ -741,6 +1027,12 @@ func (a *App) entryPaths(d *dirState) []string {
 	}
 	out := make([]string, 0, len(d.entries))
 	for _, e := range d.entries {
+		// A nested workspace root is owned by its own top-level branch. Showing
+		// it inside the enclosing root too would give one filesystem node two
+		// tree identities and duplicate every scan under it.
+		if a.isWorkspaceFolder(e.Path) {
+			continue
+		}
 		if !a.hiddenPath(e.Path) && !nestedChild[e.Path] {
 			out = append(out, e.Path)
 		}
@@ -775,7 +1067,11 @@ func (a *App) hiddenPath(p string) bool {
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(a.root, p)
 	}
-	rel, err := filepath.Rel(a.root, p)
+	root := a.workspaceRootForPath(p)
+	if root == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, p)
 	if err != nil {
 		return false
 	}
@@ -789,7 +1085,16 @@ func (a *App) hiddenPath(p string) bool {
 			}
 		}
 	}
-	return false
+	slashRel := filepath.ToSlash(rel)
+	filesRules := workspaceExcludeRules{patterns: a.workspaceSettings.FilesExclude, clauses: a.workspaceSettings.FilesExcludeWhen}
+	excepted := workspace.ExceptedWithSiblings(filesRules.patterns, filesRules.clauses, slashRel, siblingChecker(root))
+	if root != "" && excludedByRules(filesRules, root, slashRel) {
+		if info, err := os.Stat(p); err == nil && info.IsDir() && workspace.ExceptionMayReveal(exceptionRevealPatterns(filesRules), slashRel) {
+			return false
+		}
+		return true
+	}
+	return a.workspaceSettings.ExplorerExcludeGitIgnore && !excepted && a.gitIgnores(p)
 }
 
 const (
@@ -804,6 +1109,9 @@ func isPlaceholder(p string) bool {
 
 // entry finds the tree entry of a path in its loaded parent.
 func (a *App) entry(p string) (workspace.Entry, bool) {
+	if a.isWorkspaceFolder(p) {
+		return workspace.Entry{Name: a.workspaceFolderLabel(p), Path: p, Dir: true}, true
+	}
 	d := a.dirs[filepath.Dir(p)]
 	if d == nil {
 		return workspace.Entry{}, false
@@ -846,16 +1154,19 @@ func (a *App) refreshAll() {
 			a.reloadDoc(d)
 		}
 	}
-	a.quick.files = nil // listed again when next opened
+	a.quick.files, a.quick.err = nil, nil // listed again when next opened
+	a.quick.scanGen++
 	a.filter.forQuery, a.filter.tree, a.filter.roots = "", nil, nil
 }
 
 // revealInTree opens the directories above p and chooses its row.
 func (a *App) revealInTree(p string) {
-	if a.root == "" || !workspace.Within(a.root, p) || p == a.root {
+	if a.root == "" || !a.withinWorkspace(p) || a.isWorkspaceFolder(p) {
 		return
 	}
-	for dir := filepath.Dir(p); dir != a.root && workspace.Within(a.root, dir); dir = filepath.Dir(dir) {
+	root := a.workspaceRootForPath(p)
+	a.tree.Open.Add(root)
+	for dir := filepath.Dir(p); dir != root && workspace.Within(root, dir); dir = filepath.Dir(dir) {
 		a.tree.Open.Add(dir)
 	}
 	a.reveal = p
@@ -883,12 +1194,12 @@ func standalonePathKey(path string) string {
 		path = abs
 	}
 	if real, err := filepath.EvalSymlinks(path); err == nil {
-		return filepath.Clean(real)
+		return filepath.Clean(workspace.DiskSpelling(real))
 	}
 	if realParent, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
 		path = filepath.Join(realParent, filepath.Base(path))
 	}
-	return filepath.Clean(path)
+	return filepath.Clean(workspace.DiskSpelling(path))
 }
 
 // claimStandalonePath gives one document process-wide ownership of a saved
@@ -977,7 +1288,7 @@ func (a *App) openFile(path string, pos *editor.Pos) *doc {
 
 func (a *App) openFileAt(path string, to goTo) *doc {
 	g := a.focus
-	docPath := workspace.DocPath(a.root, a.realRoot, path)
+	docPath := a.docPath(path)
 	if d := a.docs[docPath]; d != nil {
 		docPath = d.path
 	}
@@ -1004,7 +1315,12 @@ func (a *App) openInMode(g *group, path string, to goTo, addTab bool) *doc {
 	a.term.maximized = false
 	a.git.diffSeq++
 	a.git.peek = nil
-	path = workspace.DocPath(a.root, a.realRoot, path)
+	path = a.docPath(path)
+	// However the path reached here — typed, dragged, restored or reported
+	// by a server — its identity is the disk's spelling, so that case and
+	// Unicode variants of one file share one document rather than two
+	// buffers editing the same bytes.
+	path = workspace.DiskSpelling(path)
 	d := a.docs[path]
 	if d == nil && a.root == "" {
 		d = standaloneDocForPath(a, path)
@@ -1016,7 +1332,7 @@ func (a *App) openInMode(g *group, path string, to goTo, addTab bool) *doc {
 		d = &doc{path: path, uri: uriOf(path), name: filepath.Base(path)}
 		if a.root == "" && !claimStandalonePath(a, d, path) {
 			a.host.RevealOpenFile(path)
-			a.note(locales.MsgThatFileIsAlreadyOpen(), true)
+			a.fail(locales.MsgThatFileIsAlreadyOpen())
 			return nil
 		}
 		// A previously discarded document can be opened and edited again in
@@ -1060,13 +1376,19 @@ func (a *App) showLoaded(g *group, d *doc) {
 	if st == nil {
 		st = a.newEditor(g, d)
 		g.eds[d.path] = st
+		if d.focusOnLoad {
+			d.focusOnLoad = false
+			if g == a.focus {
+				a.focusEditor = st
+			}
+		}
 		if g.pending[d.path].folds == nil && a.cfg.EditorFoldImports {
 			st.FoldImports()
 		}
-		if m := a.serverFor(d.path); m != nil && !a.cfg.IsTrusted(a.root) && !a.trustDismissed {
+		if m := a.serverFor(d.path); m != nil && !a.workspaceTrusted() && !a.trustDismissed {
 			a.trustAsk = true
 		}
-		if m := a.serverFor(d.path); m != nil && a.cfg.IsTrusted(a.root) {
+		if m := a.serverFor(d.path); m != nil && a.workspaceTrusted() {
 			go a.openLanguageDocument(m, a.wsCtx, d, d.uri)
 		}
 	}
@@ -1190,6 +1512,7 @@ func (a *App) loadDoc(d *doc) {
 				}
 				a.loaded(d, f, buf, false, nil)
 				d.diskText, d.bom = recovery.Base, recovery.BOM
+				expectOnDisk(d)
 				d.conflict = err == nil && (f.Text != recovery.Base || f.BOM != recovery.BOM)
 				d.gone = errors.Is(err, fs.ErrNotExist)
 			} else {
@@ -1255,6 +1578,7 @@ func (a *App) loaded(d *doc, f workspace.File, buf *editor.Buffer, same bool, er
 	}
 	d.err, d.gone, d.conflict = nil, false, false
 	d.bom, d.diskText = f.BOM, f.Text
+	expectOnDisk(d)
 	d.kind, d.size, d.plain = f.Kind, f.Size, f.Plain
 	d.video = isVideoPath(d.path) && f.Kind == workspace.Binary
 	d.stamp = fileStamp{f.Size, f.ModTime}
@@ -1399,7 +1723,10 @@ func (a *App) here() (nav.Entry, bool) {
 // userOpen opens a file because the user asked, as from the tree.
 func (a *App) userOpen(path string) {
 	a.cancelNav()
-	a.openFile(path, nil)
+	d := a.openFile(path, nil)
+	if d != nil {
+		d.previewOpened, d.focusOnLoad = false, false
+	}
 	a.focusImage = ""
 	if isImagePath(a.activePath()) {
 		a.focusImage = a.activePath()
@@ -1409,9 +1736,13 @@ func (a *App) userOpen(path string) {
 	}
 }
 
-func (a *App) previewOpen(path string) {
+// previewOpen previews path in the focused group. focus asks the
+// keyboard for the document once it shows, as Open Quickly does; without
+// it the keyboard stays where it is, as in the tree the click came from.
+func (a *App) previewOpen(path string, focus ...bool) {
+	focusEditor := len(focus) > 0 && focus[0]
 	g := a.focus
-	path = workspace.DocPath(a.root, a.realRoot, path)
+	path = a.docPath(path)
 	if d := a.docs[path]; d != nil {
 		path = d.path
 	} else if a.root == "" {
@@ -1426,13 +1757,21 @@ func (a *App) previewOpen(path string) {
 		a.cancelPendingPreview(g)
 	}
 	if g.has(path) {
-		a.userActivateIn(g, path)
+		if focusEditor {
+			a.userActivateIn(g, path)
+		} else {
+			a.activateIn(g, path)
+		}
 		a.focusImage = ""
 		return
 	}
 	for _, other := range a.groups() {
 		if other != g && other.hasDocument(path) {
-			a.userOpen(path)
+			if focusEditor {
+				a.userOpen(path)
+			} else {
+				a.openIn(other, path, goTo{})
+			}
 			a.focusImage = ""
 			return
 		}
@@ -1462,10 +1801,10 @@ func (a *App) previewOpen(path string) {
 	}
 	path = d.path
 	if d.loading && d.buf == nil && g.has(outgoing) {
-		if st := g.eds[outgoing]; st != nil {
-			a.focusEditor = st
+		g.pendingPreview = &previewTransition{doc: d, outgoing: outgoing, replaced: old, replaceable: replaceable, focusSeq: g.focusSeq, focusEditor: focusEditor}
+		if !focusEditor {
+			d.previewOpened = true
 		}
-		g.pendingPreview = &previewTransition{doc: d, outgoing: outgoing, replaced: old, replaceable: replaceable, focusSeq: g.focusSeq}
 		return
 	}
 	if replaceable {
@@ -1481,8 +1820,14 @@ func (a *App) previewOpen(path string) {
 	g.preview = path
 	a.activateIn(g, path)
 	a.showLoaded(g, d)
-	if st := g.eds[path]; st != nil {
-		a.focusEditor = st
+	if focusEditor {
+		if st := g.eds[path]; st != nil {
+			a.focusEditor = st
+		} else if d.loading {
+			d.focusOnLoad = true
+		}
+	} else {
+		d.previewOpened = true
 	}
 }
 
@@ -1585,10 +1930,10 @@ func (a *App) goToLocation(g *group, d *doc, offset int, kind string) {
 	a.observeFocusedGroup(g)
 	m := a.serverFor(d.path)
 	if m == nil {
-		a.note(locales.MsgNoLanguageServerIsConfiguredForThisFile(), false)
+		a.flash(locales.MsgNoLanguageServerIsConfiguredForThisFile())
 		return
 	}
-	if !a.cfg.IsTrusted(a.root) {
+	if !a.workspaceTrusted() {
 		a.trustAsk = true
 		a.afterTrust = func() { a.goToLocation(g, d, offset, kind) }
 		return
@@ -1606,7 +1951,6 @@ func (a *App) goToLocation(g *group, d *doc, offset int, kind string) {
 	if kind != "definition" && kind != "peek" {
 		a.findingLabel = navigationText(kind, "Finding")
 	}
-	a.notice = ""
 	go func() {
 		defer cancel()
 		locs, enc, err := locationRequest(ctx, m, d.uri, snap, pos, line, kind)
@@ -1629,7 +1973,10 @@ func targetsOf(locs []lsp.Location) (targets []target, skipped int) {
 			skipped++
 			continue
 		}
-		targets = append(targets, target{name: l.Name, path: p, pos: l.Range.Start, end: l.Range.End})
+		// Where a server answers is spelled as the server spells it;
+		// the disk's spelling is the identity the user lands in, so two
+		// spellings of one file are one target, not two windows into it.
+		targets = append(targets, target{name: l.Name, path: workspace.DiskSpelling(p), pos: l.Range.Start, end: l.Range.End})
 	}
 	return targets, skipped
 }
@@ -1680,16 +2027,16 @@ func (a *App) locationFound(g *group, from nav.Entry, targets []target, enc stri
 		a.lspFailure(err)
 	case len(targets) == 0 && skipped > 0:
 		if kind != "definition" {
-			a.note(navigationText(kind, "Unavailable"), false)
+			a.flash(navigationText(kind, "Unavailable"))
 			return
 		}
-		a.note(locales.MsgTheDefinitionIsInAPlaceThatIs(), false)
+		a.flash(locales.MsgTheDefinitionIsInAPlaceThatIs())
 	case len(targets) == 0:
 		if kind != "definition" {
-			a.note(navigationText(kind, "Empty"), false)
+			a.flash(navigationText(kind, "Empty"))
 			return
 		}
-		a.note(locales.MsgNoDefinitionFound(), false)
+		a.flash(locales.MsgNoDefinitionFound())
 	case len(targets) == 1:
 		a.jump(g, from, targets[0], enc)
 	default:
@@ -1705,20 +2052,33 @@ func (a *App) locationFound(g *group, from nav.Entry, targets []target, enc stri
 
 // lspFailure reports why a language server request failed.
 func (a *App) lspFailure(err error) {
+	var failure *operr.Error
 	switch {
+	case errors.As(err, &failure) && failure.Kind == operr.Unsupported:
+		a.flash(locales.Unavailable() + ": " + failure.Operation)
+	case errors.As(err, &failure) && failure.Status == operr.Persistent:
+		// A spent restart budget surfaces as bare "unexpected (persistent)"
+		// in Error(); the user needs the server named and the way back.
+		name := ""
+		if m := a.serverFor(a.activePath()); m != nil {
+			name = m.Name()
+		}
+		a.fail(strings.TrimSpace(name + " " + locales.MsgServerCrashedRepeatedly()))
+	case errors.Is(err, proc.ErrUntrustedExecutable):
+		a.fail("Denied: executables inside this workspace are never run.")
 	case errors.Is(err, languages.ErrNoGopls):
-		a.note(locales.MsgGoToDefinitionNeedsGoplsInstallItWith(), true)
+		a.fail(locales.MsgGoToDefinitionNeedsGoplsInstallItWith())
 	case errors.Is(err, languages.ErrNoCMakeServer):
-		a.note(locales.MsgInstallCmakeLanguageServerAndMakeItAvailable(), true)
+		a.fail(locales.MsgInstallCmakeLanguageServerAndMakeItAvailable())
 	case errors.Is(err, languages.ErrNoClangd):
-		a.note(locales.MsgInstallClangdAndMakeItAvailableOnPATH(), true)
+		a.fail(locales.MsgInstallClangdAndMakeItAvailableOnPATH())
 	case errors.Is(err, languages.ErrNoTypeScriptServer):
-		a.note(locales.MsgInstallTheTypeScriptLanguageServerInSettingsThen(), true)
+		a.fail(locales.MsgInstallTheTypeScriptLanguageServerInSettingsThen())
 	case errors.Is(err, context.DeadlineExceeded):
-		a.note(locales.MsgTheLanguageServerTookTooLongToAnswer(), true)
+		a.fail(locales.MsgTheLanguageServerTookTooLongToAnswer())
 	case errors.Is(err, context.Canceled):
 	default:
-		a.note(locales.MsgLanguageServerFailed()+err.Error(), true)
+		a.fail(locales.MsgLanguageServerFailed() + err.Error())
 	}
 }
 
@@ -1732,7 +2092,13 @@ func (a *App) jump(g *group, from nav.Entry, t target, enc string) {
 
 // trust records that the user trusts the workspace to run language servers in.
 func (a *App) trust() {
-	a.cfg.Trust(a.root)
+	if len(a.workspaceFolders) == 0 {
+		a.cfg.Trust(a.root)
+	} else {
+		for _, folder := range a.workspaceFolders {
+			a.cfg.Trust(folder.Path)
+		}
+	}
 	a.saveConfig()
 	a.trustAsk = false
 	if a.lsp == nil {
@@ -1753,7 +2119,6 @@ func (a *App) retryLSP() {
 		a.invalidateHover()
 		a.lsp.Retry()
 		a.lspState, a.lspErr = a.lsp.Status()
-		a.notice = ""
 		a.openServerDocuments(a.lsp)
 		if a.problems.started {
 			a.startProblemServer(filepath.Join(a.root, "go.mod"))
@@ -1844,7 +2209,6 @@ func (a *App) retryCustomLSP(idx int) {
 		state langserver.State
 		err   error
 	}{s, err}
-	a.notice = ""
 	a.openServerDocuments(m)
 }
 
@@ -1853,7 +2217,6 @@ func (a *App) retryTypeScriptLSP() {
 		a.invalidateHover()
 		a.tsLSP.Retry()
 		a.tsState, a.tsErr = a.tsLSP.Status()
-		a.notice = ""
 		a.openServerDocuments(a.tsLSP)
 	}
 }
@@ -1866,7 +2229,7 @@ func (a *App) resetTypeScriptServer() {
 		return
 	}
 	gen, epoch := a.gen, a.tsEpoch
-	a.tsLSP = languages.NewTypeScriptServer(a.root, languages.StartTypeScript(a.serverLog("tsrs")), func(s langserver.State, err error) {
+	a.tsLSP = languages.NewTypeScriptServer(a.root, lspWorkspaceFolders(a.workspaceFolders), languages.StartTypeScript(a.serverLog("tsrs")), func(s langserver.State, err error) {
 		a.post.Post(func() {
 			if a.gen == gen && a.tsEpoch == epoch {
 				a.tsState, a.tsErr = s, err
@@ -1973,7 +2336,7 @@ func (a *App) upgradeLanguage(d *doc, m *langserver.Server, client langserver.Cl
 }
 
 func (a *App) openServerDocuments(only *langserver.Server) {
-	if a.wsCtx == nil || !a.cfg.IsTrusted(a.root) {
+	if a.wsCtx == nil || !a.workspaceTrusted() {
 		return
 	}
 	for _, d := range a.docs {
@@ -2009,10 +2372,10 @@ func (a *App) findUsagesAt(callers bool, anchor ui.Point, validAnchor bool) {
 	}
 	m := a.serverFor(d.path)
 	if m == nil {
-		a.note(locales.MsgNoLanguageServerIsConfiguredForThisFile(), false)
+		a.flash(locales.MsgNoLanguageServerIsConfiguredForThisFile())
 		return
 	}
-	if !a.cfg.IsTrusted(a.root) {
+	if !a.workspaceTrusted() {
 		a.trustAsk = true
 		a.afterTrust = func() { a.findUsagesAt(callers, anchor, validAnchor) }
 		return
@@ -2029,7 +2392,6 @@ func (a *App) findUsagesAt(callers bool, anchor ui.Point, validAnchor bool) {
 	if callers {
 		a.findingLabel = "Finding callers…"
 	}
-	a.notice = ""
 	seq, gen := a.navSeq, a.gen
 	go func() {
 		defer cancel()
@@ -2077,10 +2439,10 @@ func (a *App) findUsagesAt(callers bool, anchor ui.Point, validAnchor bool) {
 			}
 			if len(targets) == 0 {
 				if skipped > 0 {
-					a.note(locales.MsgResultsAreNotInLocalFiles(), false)
+					a.flash(locales.MsgResultsAreNotInLocalFiles())
 				} else {
 					display := referenceTitle(name)
-					a.note(locales.Catalog.Format(i18n.Locale(), "msgNoSFound", map[string]any{"name": display}), false)
+					a.flash(locales.Catalog.Format(i18n.Locale(), "msgNoSFound", map[string]any{"name": display}))
 				}
 				return
 			}
@@ -2095,7 +2457,7 @@ func (a *App) loadRelatedPreviews(ch *defChoices) {
 	// Snapshots preserve unsaved edits without reading editor state in a worker.
 	snapshots := make(map[string]editor.Snapshot)
 	for _, t := range ch.locs {
-		path := workspace.DocPath(a.root, a.realRoot, t.path)
+		path := a.docPath(t.path)
 		if d := a.docs[path]; d != nil && d.buf != nil {
 			snapshots[t.path] = d.buf.Snapshot()
 		}
@@ -2203,7 +2565,6 @@ func (a *App) retryClangd() {
 		a.invalidateHover()
 		a.clangLSP.Retry()
 		a.clangState, a.clangErr = a.clangLSP.Status()
-		a.notice = ""
 		a.openServerDocuments(a.clangLSP)
 	}
 }
@@ -2213,7 +2574,20 @@ func (a *App) retryCMake() {
 		a.invalidateHover()
 		a.cmakeLSP.Retry()
 		a.cmakeState, a.cmakeErr = a.cmakeLSP.Status()
-		a.notice = ""
 		a.openServerDocuments(a.cmakeLSP)
 	}
+}
+
+// configLoadNote is what the startup tells the user when the settings
+// file degraded on load, or nothing when it loaded cleanly.
+func configLoadNote(cfg *config.Config) string {
+	issues := cfg.Issues()
+	if len(issues) == 0 {
+		return ""
+	}
+	details := make([]string, len(issues))
+	for i, issue := range issues {
+		details[i] = issue.Error()
+	}
+	return locales.Catalog.Format(i18n.Locale(), "msgConfigLoadProblem", map[string]any{"detail": strings.Join(details, "; ")})
 }

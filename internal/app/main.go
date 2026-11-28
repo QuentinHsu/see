@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"see/internal/cli"
 	"see/internal/config"
 	"see/locales"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -59,6 +61,15 @@ func Main() {
 	mygo.Use(native.Plugin)
 	cfg := config.Load(config.Path())
 	a := newApp(cfg)
+	if note := configLoadNote(cfg); note != "" {
+		// The configuration degraded: tell the user what was reset rather
+		// than silently starting over, and keep it in the log where the
+		// welcome screen's note cannot reach.
+		for _, issue := range cfg.Issues() {
+			log.Printf("see: settings: %s", issue.Error())
+		}
+		a.welcomeNote = note
+	}
 	a.hasWelcome = true
 	var (
 		win, welcome   *mygo.Window
@@ -79,6 +90,8 @@ func Main() {
 	)
 	refreshEditorPrefs := func() { applyEditorPrefsToProjects(projects) }
 	a.editorPrefsChanged = refreshEditorPrefs
+	refreshVibrancy := func() { applyVibrancyToProjects(projects, cfg) }
+	a.vibrancyChanged = refreshVibrancy
 	refreshGitDiscovery := func() {
 		for _, p := range projects {
 			if p.win != nil && !p.win.IsDestroyed() {
@@ -122,7 +135,7 @@ func Main() {
 			MinWidth:  480,
 			MinHeight: 320,
 			// The toolbar shares a line with the window controls, and the
-			// navigator shows the desktop's material through it, as
+			// navigator can show the desktop's material through it, as
 			// Xcode's: macOS's sidebar material, Mica on Windows 11, and
 			// a plain background on Linux, which has none. A compact bar:
 			// macOS's inset style would add a toolbar 52 points high, so
@@ -130,10 +143,13 @@ func Main() {
 			TitleBarStyle:        mygo.TitleBarHidden,
 			TitleBarHeight:       toolbarHeight,
 			TrafficLightPosition: &mygo.Point{X: 20, Y: (toolbarHeight - trafficLightSize) / 2},
-			Vibrancy:             mygo.VibrancySidebar,
-			Hidden:               true, // until a folder opens (windows.sync)
-			Content:              ui.View(func(c *ui.Context) { a.view(c); wins.sync(win) }),
+			// On Windows a material can change only in a window created with
+			// one; the configured material is applied before the window shows.
+			Vibrancy: mygo.VibrancySidebar,
+			Hidden:   true, // until a folder opens (windows.sync)
+			Content:  ui.View(func(c *ui.Context) { a.view(c); wins.sync(win) }),
 		})
+		win.SetVibrancy(projectWindowVibrancy(cfg))
 		configureProjectWindowTabs(win)
 		// The welcome window, as Xcode's: of its own, of one size, its
 		// buttons over its left side.
@@ -203,7 +219,17 @@ func Main() {
 			a.showWelcome = false
 			wins.sync(nil)
 			if path != "" && !forceNewWindow {
-				if root, err := workspace.CanonicalRoot(path); err == nil {
+				if a.multiRootWorkspacesEnabled() && strings.EqualFold(filepath.Ext(path), ".code-workspace") {
+					if identity, err := filepath.Abs(path); err == nil {
+						for _, p := range projects {
+							if p.app.workspaceID == filepath.Clean(identity) {
+								p.win.Show()
+								p.win.Focus()
+								return p
+							}
+						}
+					}
+				} else if root, err := workspace.CanonicalRoot(path); err == nil {
 					for _, p := range projects {
 						if p.app.root == root {
 							p.win.Show()
@@ -217,6 +243,7 @@ func Main() {
 			child.trustChanged = a.trustChanged
 			child.editorPrefsChanged = refreshEditorPrefs
 			child.gitDiscoveryChanged = refreshGitDiscovery
+			child.vibrancyChanged = refreshVibrancy
 			child.ownsStandaloneSession = false
 			child.version = a.version
 			child.hasWelcome = true
@@ -233,6 +260,7 @@ func Main() {
 				TrafficLightPosition: &mygo.Point{X: 20, Y: (toolbarHeight - trafficLightSize) / 2},
 				Vibrancy:             mygo.VibrancySidebar, Content: ui.View(child.view),
 			})
+			childWin.SetVibrancy(projectWindowVibrancy(cfg))
 			configureProjectWindowTabs(childWin)
 			p := &projectWindow{app: child, win: childWin}
 			projects = append(projects, p)
@@ -314,6 +342,16 @@ func Main() {
 				p.win.Show()
 				p.win.Focus()
 				p.win.Update(func() {}) // draws the file
+				return
+			}
+			if a.multiRootWorkspacesEnabled() && strings.EqualFold(filepath.Ext(path), ".code-workspace") {
+				if a.root == "" {
+					a.openWorkspace(path)
+					wins.sync(nil)
+					win.Focus()
+				} else {
+					openProject(path)
+				}
 				return
 			}
 			if fi, err := os.Stat(path); err == nil && fi.IsDir() {
@@ -430,6 +468,15 @@ func Main() {
 					return
 				}
 				path := req.Path
+				if a.multiRootWorkspacesEnabled() && strings.EqualFold(filepath.Ext(path), ".code-workspace") {
+					forceNewWindow = req.NewWindow
+					p := openProject(path)
+					forceNewWindow = false
+					wins.sync(nil)
+					p.win.Show()
+					p.win.Focus()
+					return
+				}
 				if p := projectHolding(projects, path); p != nil && !req.NewWindow {
 					p.app.revealCLIPath(path)
 					wins.sync(nil)
@@ -592,13 +639,15 @@ func projectHolding(projects []*projectWindow, path string) *projectWindow {
 		}
 	}
 	var best *projectWindow
+	var bestRoot string
 	for _, p := range projects {
-		root := p.app.root
-		if root == "" || (p.win != nil && p.win.IsDestroyed()) || !workspace.Within(root, path) {
+		root := p.app.workspaceRootForPath(path)
+		if root == "" || (p.win != nil && p.win.IsDestroyed()) {
 			continue
 		}
-		if best == nil || len(root) > len(best.app.root) {
+		if best == nil || len(root) > len(bestRoot) {
 			best = p
+			bestRoot = root
 		}
 	}
 	return best

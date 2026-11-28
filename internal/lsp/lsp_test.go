@@ -565,8 +565,8 @@ func TestSignatureHelp(t *testing.T) {
 		t.Error("capability read of a server without it")
 	}
 	help, err = c2.SignatureHelp(context.Background(), "file:///w/a.go", Position{2, 8})
-	if err != nil || help != nil {
-		t.Errorf("null result: %v %v", help, err)
+	if err == nil || help != nil {
+		t.Errorf("unsupported result: %v %v", help, err)
 	}
 }
 
@@ -642,10 +642,36 @@ func TestSemanticTokensPartialCapability(t *testing.T) {
 	if !c.HasSemanticTokens() || c.SemanticTokensFull() || !c.SemanticTokensRange() {
 		t.Fatal("capability not read")
 	}
-	if _, err := c.SemanticTokens(context.Background(), "file:///w/a.go", -1, -1); err != nil {
+	if _, err := c.SemanticTokens(context.Background(), "file:///w/a.go", -1, -1); err == nil || method != "" {
+		t.Fatalf("whole-document request sent to range-only server: %v %s", err, method)
+	}
+	if _, err := c.SemanticTokens(context.Background(), "file:///w/a.go", 0, 4); err != nil {
 		t.Fatal(err)
 	}
 	if method != "textDocument/semanticTokens/range" {
 		t.Fatalf("method = %s", method)
+	}
+}
+
+func TestWorkspaceFolderParamsUseEveryRoot(t *testing.T) {
+	opts := Options{
+		RootURI: "file:///first",
+		WorkspaceFolders: []WorkspaceFolder{
+			{URI: "file:///first", Name: "First"},
+			{URI: "file:///second", Name: "Second"},
+		},
+	}
+	got := workspaceFolderParams(opts)
+	if len(got) != 2 || got[0]["uri"] != "file:///first" || got[1]["uri"] != "file:///second" || got[1]["name"] != "Second" {
+		t.Fatalf("workspace folders: %#v", got)
+	}
+	h := (*handler)(&Client{opts: opts})
+	reply, err := h.Handle(context.Background(), "workspace/workspaceFolders", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	folders, ok := reply.([]map[string]any)
+	if !ok || len(folders) != 2 {
+		t.Fatalf("server-facing workspace folders: %#v", reply)
 	}
 }

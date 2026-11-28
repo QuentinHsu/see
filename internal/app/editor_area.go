@@ -3,7 +3,6 @@ package app
 import (
 	"fmt"
 	"math"
-	"path/filepath"
 	"see/locales"
 	"strings"
 	"unicode/utf8"
@@ -646,7 +645,10 @@ func (a *App) document(c *ui.Context, g *group, d *doc) {
 			// A navigation went here: the keys read on from it.
 			ed.Focus()
 			a.focusEditor = nil
-		case g == a.focus && !a.term.open:
+		case g == a.focus && !a.term.open && !d.previewOpened:
+			// An editor opened to be edited takes the keyboard as it
+			// appears; a preview's does not, so that a click in the tree
+			// keeps the keys walking its rows.
 			ed.AutoFocus()
 		}
 		if a.focusGroupTarget == nil && ed.FocusWithin() && a.focus != g {
@@ -881,10 +883,10 @@ func (a *App) trustBanner(c *ui.Context) {
 	// for.
 	ui.Row(c).FillWidth().Padding(8, 12).Gap(12).AlignItems(ui.Center).Background(colors(c).InfoBg).Children(func() {
 		ui.Column(c).Grow(1).Shrink(1).Gap(2).Children(func() {
-			ui.Text(c, locales.TrustBannerLead(filepath.Base(a.root))).FontSize(12).FontWeight(600).FillWidth()
+			ui.Text(c, a.trustBannerLead()).FontSize(12).FontWeight(600).FillWidth()
 			ui.Text(c, locales.TrustBannerDetail()).FontSize(11).TextColor(colors(c).Muted).FillWidth()
 		})
-		ui.Button(c, locales.TrustFolder()).OnClick(a.trust)
+		ui.Button(c, a.trustButtonLabel()).OnClick(a.trust)
 		ui.Button(c, locales.NotNow()).OnClick(func() { a.trustAsk, a.afterTrust = false, nil; a.trustDismissed = true })
 	})
 }

@@ -26,25 +26,42 @@ import (
 var ErrNoRipgrep = errors.New("ripgrep (rg) is not installed")
 
 // FindRipgrep finds rg: $SEE_RG, then the candidates an installation added
-// (in the order given), then PATH. One inside the workspace is never used.
+// (in the order given), then PATH. One inside the workspace is never used —
+// inside means what the candidate resolves to in the disk's own spelling,
+// the identity check the launch boundary applies, not the lexical shape of
+// the path: a case variant of a workspace path on a case-insensitive volume,
+// or a symlink anywhere pointing into the workspace, names the workspace's
+// bytes. A copy discovered on PATH that resolves inside the workspace is
+// skipped silently — the user never pointed at it; one the user or an
+// installation pointed at is the typed denial proc.ErrUntrustedExecutable,
+// as the language-server finders report theirs.
 func FindRipgrep(root string, installed ...string) (string, error) {
-	var candidates []string
+	type candidate struct {
+		path     string
+		explicit bool
+	}
+	var candidates []candidate
 	if p := os.Getenv("SEE_RG"); p != "" {
-		candidates = append(candidates, p)
+		candidates = append(candidates, candidate{p, true})
 	}
-	candidates = append(candidates, installed...)
+	for _, p := range installed {
+		candidates = append(candidates, candidate{p, true})
+	}
 	if p, err := exec.LookPath("rg"); err == nil {
-		candidates = append(candidates, p)
+		candidates = append(candidates, candidate{p, false})
 	}
-	for _, p := range candidates {
-		if !filepath.IsAbs(p) {
+	for _, c := range candidates {
+		if !filepath.IsAbs(c.path) {
 			continue
 		}
-		if rel, err := filepath.Rel(root, p); root != "" && err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if err := proc.ValidateExecutable(root, c.path); err != nil {
+			if errors.Is(err, proc.ErrUntrustedExecutable) && c.explicit {
+				return "", err
+			}
 			continue
 		}
-		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
-			return p, nil
+		if fi, err := os.Stat(c.path); err == nil && fi.Mode().IsRegular() {
+			return c.path, nil
 		}
 	}
 	return "", ErrNoRipgrep
@@ -62,6 +79,10 @@ func InstallHint() string {
 }
 
 // Options say what to find and where.
+type IgnoreFileOptions struct {
+	All, Global, Parent bool
+}
+
 type Options struct {
 	Query         string
 	CaseSensitive bool
@@ -71,6 +92,8 @@ type Options struct {
 	Include, Exclude string
 	// MaxMatches stops the search once this many are found; 0 is 20000.
 	MaxMatches int
+	// NoIgnoreFiles disables ignore files as rg's --no-ignore* flags.
+	NoIgnoreFiles IgnoreFileOptions
 }
 
 // Match is one place the query was found.
@@ -110,6 +133,16 @@ func ignoreGlobs() []string {
 // Args are ripgrep's arguments for o.
 func Args(o Options) []string {
 	args := []string{"--json", "--max-filesize", "4M", "--max-columns", "4000", "--no-config"}
+	if o.NoIgnoreFiles.All {
+		args = append(args, "--no-ignore")
+	} else {
+		if o.NoIgnoreFiles.Global {
+			args = append(args, "--no-ignore-global")
+		}
+		if o.NoIgnoreFiles.Parent {
+			args = append(args, "--no-ignore-parent")
+		}
+	}
 	if !o.Regexp {
 		args = append(args, "--fixed-strings")
 	}
@@ -156,7 +189,7 @@ type rgText struct {
 // Run searches root with the ripgrep at rg, calling emit with each
 // file's matches as ripgrep finishes it, until ctx is canceled or
 // MaxMatches is reached.
-func Run(ctx context.Context, rg, root string, o Options, emit func(File)) (Stats, error) {
+func Run(ctx context.Context, rg, root string, o Options, extraExcludes []string, emit func(File)) (Stats, error) {
 	if o.Query == "" {
 		return Stats{}, errors.New("empty query")
 	}
@@ -166,7 +199,16 @@ func Run(ctx context.Context, rg, root string, o Options, emit func(File)) (Stat
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := proc.CommandContext(ctx, rg, Args(o)...)
+	args := Args(o)
+	if len(extraExcludes) > 0 {
+		tail := append([]string(nil), args[len(args)-4:]...)
+		args = args[:len(args)-4]
+		for _, glob := range extraExcludes {
+			args = append(args, "-g", "!"+glob)
+		}
+		args = append(args, tail...)
+	}
+	cmd := proc.CommandContext(ctx, rg, args...)
 	cmd.Dir = root
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -256,21 +298,40 @@ func trimLineEnding(s string) string {
 	return s
 }
 
-// preview cuts a long line around a match, at character boundaries.
+// previewWidth is how much of a long line a preview shows.
+const previewWidth = 200
+
+// preview cuts a long line around a match, at character boundaries. The
+// coordinates are ripgrep's, and are clamped rather than trusted: they
+// arrive through a parser of another process's output, and a slice out
+// of range here would crash the editor from a background goroutine.
 func preview(line int, text string, start, end int) Match {
+	start = min(max(start, 0), len(text))
+	end = min(max(end, 0), len(text))
+	if start > end {
+		start = end
+	}
 	m := Match{Line: line, Col: start, End: end}
 	from, to := 0, len(text)
-	const before, after = 40, 160
-	if start > before {
-		from = start - before
-		for from < start && !utf8.RuneStart(text[from]) {
+	if to-from > previewWidth {
+		// The window centers the match, shifted back inside the line
+		// and then far enough that the whole match stays inside it:
+		// everything below slices by that invariant. Rune alignment
+		// walks at most three bytes, the width of the longest
+		// continuation run inside a valid character.
+		from = max(0, min(start-previewWidth/2, len(text)-previewWidth))
+		to = from + previewWidth
+		if end > to {
+			to = end
+		}
+		// The walk forward never crosses the match itself: slicing from
+		// past it would leave nothing to highlight, and subtraction
+		// below assumes from <= start.
+		for i := 0; i < 3 && from < start && !utf8.RuneStart(text[from]); i++ {
 			from++
 		}
-	}
-	if to-end > after {
-		to = end + after
-		for to > end && to < len(text) && !utf8.RuneStart(text[to]) {
-			to--
+		for i := 0; i < 3 && to < len(text) && !utf8.RuneStart(text[to]); i++ {
+			to++
 		}
 	}
 	pre := text[from:to]
@@ -289,13 +350,42 @@ func preview(line int, text string, start, end int) Match {
 // ListFiles lists the files under root for quick open, relative to it
 // and separated by slashes: with `rg --files` when rg is given, which
 // leaves out what .gitignore does, else by walking the tree. It stops
-// at limit files. The walk also leaves out the folders skipDir names,
+// at limit matching files. The walk also leaves out the folders skipDir names,
 // by their slash-separated path relative to root, when it is given.
-func ListFiles(ctx context.Context, rg, root string, limit int, skipDir func(rel string) bool) ([]string, bool, error) {
+//
+// Its contract with callers:
+//
+//   - Ordering is unspecified and must not be depended on; ranking is
+//     the caller's job. Paths are byte-wise distinct within one call:
+//     neither `rg --files` nor the walk can visit a file twice, so a
+//     duplicate in the result would itself be a bug to fix, not input
+//     to deduplicate away.
+//   - truncated means the scan stopped at limit and there may be more
+//     files than reported; the files returned are the first limit the
+//     scan happened to reach. Without truncation the list is complete
+//     for its scan moment, modulo concurrent filesystem change, which
+//     no scan can observe atomically.
+//   - An error means the list is not trustworthy at all: nothing is
+//     returned, not even a partial prefix, so a failed scan can never
+//     pass for an empty workspace. Cancellation is reported as the
+//     context's error, not as truncation.
+//   - Memory stays bounded by limit paths plus one scanner line,
+//     regardless of how large the workspace is.
+func ListFiles(ctx context.Context, rg, root string, limit int, skipDir func(rel string) bool, skipFile func(rel string) bool, noIgnoreFiles IgnoreFileOptions) ([]string, bool, error) {
 	if rg == "" {
-		return walkFiles(ctx, root, limit, skipDir)
+		return walkFiles(ctx, root, limit, skipDir, skipFile)
 	}
 	args := append([]string{"--files", "--no-config"}, ignoreGlobs()...)
+	if noIgnoreFiles.All {
+		args = append(args, "--no-ignore")
+	} else {
+		if noIgnoreFiles.Global {
+			args = append(args, "--no-ignore-global")
+		}
+		if noIgnoreFiles.Parent {
+			args = append(args, "--no-ignore-parent")
+		}
+	}
 	cmd := proc.CommandContext(ctx, rg, args...)
 	cmd.Dir = root
 	var stderr strings.Builder
@@ -311,11 +401,20 @@ func ListFiles(ctx context.Context, rg, root string, limit int, skipDir func(rel
 	truncated := false
 	sc := bufio.NewScanner(out)
 	for sc.Scan() {
+		rel := filepath.ToSlash(sc.Text())
+		if skipFile != nil && skipFile(rel) {
+			continue
+		}
 		if len(files) >= limit {
 			truncated = true
 			break
 		}
-		files = append(files, filepath.ToSlash(sc.Text()))
+		// What rg prints is a tool's claim about a relative path; keep
+		// only well-formed confined ones, as a file named oddly enough
+		// must not let a join reach outside the root.
+		if workspace.ValidRel(rel) {
+			files = append(files, rel)
+		}
 	}
 	if truncated || sc.Err() != nil {
 		_ = cmd.Process.Kill()
@@ -337,7 +436,7 @@ func ListFiles(ctx context.Context, rg, root string, limit int, skipDir func(rel
 }
 
 // walkFiles lists files without ripgrep.
-func walkFiles(ctx context.Context, root string, limit int, skipDir func(rel string) bool) ([]string, bool, error) {
+func walkFiles(ctx context.Context, root string, limit int, skipDir func(rel string) bool, skipFile func(rel string) bool) ([]string, bool, error) {
 	var files []string
 	truncated := false
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
@@ -367,10 +466,18 @@ func walkFiles(ctx context.Context, root string, limit int, skipDir func(rel str
 			return filepath.SkipAll
 		}
 		rel, _ := filepath.Rel(root, p)
+		if skipFile != nil && skipFile(filepath.ToSlash(rel)) {
+			return nil
+		}
 		files = append(files, filepath.ToSlash(rel))
 		return nil
 	})
-	return files, truncated, err
+	if err != nil {
+		// Like the ripgrep scan, a failed walk returns nothing: partial
+		// results of an interrupted walk are not a list anyone can use.
+		return nil, false, err
+	}
+	return files, truncated, nil
 }
 
 // Scored is a path quick open matched, best first.
@@ -429,7 +536,14 @@ func unflip(p string, idx []int) []int {
 
 func appendUnflipped(out []int, p string, idx []int) []int {
 	dir, name := splitPath(p)
+	flipped := len(name) + 1 + len(dir) // "name dir" is one byte longer than the path
 	for _, i := range idx {
+		if i < 0 || i >= flipped {
+			// The matcher never produces these, but a hit outside the
+			// flipped string would unflip to a byte outside the path,
+			// where the UI highlights by index without checking again.
+			continue
+		}
 		switch {
 		case i < len(name):
 			out = append(out, len(dir)+i)

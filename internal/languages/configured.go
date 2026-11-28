@@ -3,7 +3,6 @@ package languages
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -14,7 +13,6 @@ import (
 	"see/internal/lsp"
 	"see/internal/shellpath"
 	"see/internal/uri"
-	"see/internal/workspace"
 )
 
 // configuredExtensions maps the spec's extensions, lowercased and dotted,
@@ -89,7 +87,9 @@ func fileLanguage(path string) string {
 }
 
 // FindConfigured resolves the server's executable as the built-in finders
-// do: on PATH, never inside the workspace.
+// do: on PATH, never inside the workspace. The command is one the user
+// configured, so the trust boundary denying it is reported as the denial
+// it is — the software is installed; it is where it is that cannot run.
 func FindConfigured(root string, spec config.LSPConfig) (string, error) {
 	if len(spec.Command) == 0 {
 		return "", fmt.Errorf("%s is not configured with a command", spec.Name)
@@ -102,18 +102,10 @@ func FindConfigured(root string, spec config.LSPConfig) (string, error) {
 		}
 		p = found
 	}
-	resolved, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		return "", fmt.Errorf("%s is not installed", spec.Name)
-	}
-	realRoot := root
-	if r, err := filepath.EvalSymlinks(root); err == nil {
-		realRoot = r
-	}
-	if root != "" && (workspace.Within(root, p) || workspace.Within(realRoot, resolved)) {
-		return "", fmt.Errorf("%s is not installed", spec.Name)
-	}
-	if fi, err := os.Stat(resolved); err != nil || !fi.Mode().IsRegular() {
+	if err, denied := validateCandidate(root, p); err != nil {
+		if denied {
+			return "", err
+		}
 		return "", fmt.Errorf("%s is not installed", spec.Name)
 	}
 	return p, nil
@@ -123,7 +115,7 @@ func FindConfigured(root string, spec config.LSPConfig) (string, error) {
 // runs the configured command with its configured environment, as the
 // built-in starters run theirs.
 func StartConfigured(spec config.LSPConfig, logf func(string, ...any)) langserver.Starter {
-	return func(ctx context.Context, root string, onExit func(error)) (langserver.Client, error) {
+	return func(ctx context.Context, root string, folders []lsp.WorkspaceFolder, onExit func(error)) (langserver.Client, error) {
 		if err := shellpath.Wait(ctx); err != nil {
 			return nil, err
 		}
@@ -134,6 +126,7 @@ func StartConfigured(spec config.LSPConfig, logf func(string, ...any)) langserve
 		return lsp.Start(ctx, p, spec.Command[1:], lsp.Options{
 			RootPath:              root,
 			RootURI:               uri.FromPath(root),
+			WorkspaceFolders:      folders,
 			ServerID:              spec.Name,
 			Name:                  filepath.Base(root),
 			InitializationOptions: spec.InitializationOptions,
@@ -162,13 +155,13 @@ func envList(env map[string]string) []string {
 
 // NewConfiguredServer returns the manager of one configured server for
 // root, with the same lifecycle and recovery the built-in ones have.
-func NewConfiguredServer(spec config.LSPConfig, root string, onState func(langserver.State, error),
+func NewConfiguredServer(spec config.LSPConfig, root string, folders []lsp.WorkspaceFolder, onState func(langserver.State, error),
 	onDiagnostics langserver.DiagnosticsHandler, logf func(string, ...any)) *langserver.Server {
 	notInstalled := func(err error) bool {
 		return err != nil && strings.HasSuffix(err.Error(), "is not installed")
 	}
 	return langserver.New(langserver.Options{
-		Name: spec.Name, Root: root, Start: StartConfigured(spec, logf), Language: ConfiguredLanguage(spec),
+		Name: spec.Name, Root: root, Folders: folders, Start: StartConfigured(spec, logf), Language: ConfiguredLanguage(spec),
 		OnState: onState, OnDiagnostics: onDiagnostics, Logf: logf,
 		Recover: func(err error) bool {
 			if !notInstalled(err) {

@@ -3,6 +3,8 @@ package langserver
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -49,6 +51,8 @@ func (c *fakeClient) DidChange(uri string, version int, text string) error {
 	if err := c.record("change " + text); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.changeErr
 }
 func (c *fakeClient) DidClose(uri string) error { return c.record("close") }
@@ -61,7 +65,7 @@ func (c *fakeClient) Hover(context.Context, string, lsp.Position) (string, *lsp.
 func (c *fakeClient) Shutdown(time.Duration) {}
 
 func serving(c Client, starts *int) Starter {
-	return func(context.Context, string, func(error)) (Client, error) {
+	return func(context.Context, string, []lsp.WorkspaceFolder, func(error)) (Client, error) {
 		*starts++
 		return c, nil
 	}
@@ -92,7 +96,7 @@ func TestStartsOnceAndReportsStates(t *testing.T) {
 func TestFailureHoldsUntilRetry(t *testing.T) {
 	starts := 0
 	boom := errors.New("boom")
-	s := New(Options{Start: func(context.Context, string, func(error)) (Client, error) {
+	s := New(Options{Start: func(context.Context, string, []lsp.WorkspaceFolder, func(error)) (Client, error) {
 		starts++
 		return nil, boom
 	}})
@@ -108,12 +112,12 @@ func TestFailureHoldsUntilRetry(t *testing.T) {
 	}
 }
 
-func TestServerWithoutDefinitionFails(t *testing.T) {
+func TestServerWithoutDefinitionIsReady(t *testing.T) {
 	starts := 0
 	s := New(Options{Start: serving(&fakeClient{noDefinition: true}, &starts)})
 	defer s.StopWait(time.Second)
-	if _, err := s.Get(context.Background()); err == nil {
-		t.Fatal("a server without Go to Definition was used")
+	if _, err := s.Get(context.Background()); err != nil || serverState(s) != Ready {
+		t.Fatalf("optional definition support prevented readiness: %v", err)
 	}
 }
 
@@ -121,7 +125,7 @@ func TestRecoverRestartsOnce(t *testing.T) {
 	starts := 0
 	missing := errors.New("missing")
 	s := New(Options{
-		Start: func(context.Context, string, func(error)) (Client, error) {
+		Start: func(context.Context, string, []lsp.WorkspaceFolder, func(error)) (Client, error) {
 			starts++
 			return nil, missing
 		},
@@ -138,7 +142,7 @@ func TestRecoverRestartsOnce(t *testing.T) {
 
 func TestExitOfAnOldServerIsIgnored(t *testing.T) {
 	var exits []func(error)
-	s := New(Options{Name: "fake", Start: func(_ context.Context, _ string, onExit func(error)) (Client, error) {
+	s := New(Options{Name: "fake", Start: func(_ context.Context, _ string, _ []lsp.WorkspaceFolder, onExit func(error)) (Client, error) {
 		exits = append(exits, onExit)
 		return &fakeClient{}, nil
 	}})
@@ -263,7 +267,7 @@ func TestExitedServerRestartsOnBackoff(t *testing.T) {
 	var mu sync.Mutex
 	var exits []func(error)
 	var starts atomic.Int32
-	s := New(Options{Name: "fake", Start: func(_ context.Context, _ string, onExit func(error)) (Client, error) {
+	s := New(Options{Name: "fake", Start: func(_ context.Context, _ string, _ []lsp.WorkspaceFolder, onExit func(error)) (Client, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		exits = append(exits, onExit)
@@ -304,7 +308,7 @@ func TestNeverReadyExitIsNotRestarted(t *testing.T) {
 	var mu sync.Mutex
 	var exits []func(error)
 	var starts atomic.Int32
-	s := New(Options{Name: "fake", Start: func(_ context.Context, _ string, onExit func(error)) (Client, error) {
+	s := New(Options{Name: "fake", Start: func(_ context.Context, _ string, _ []lsp.WorkspaceFolder, onExit func(error)) (Client, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		exits = append(exits, onExit)
@@ -340,4 +344,81 @@ func waitFor(t *testing.T, ok func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting")
+}
+
+func TestBlockedWriterFailsSessionOnQueueOverflow(t *testing.T) {
+	blocked, release := make(chan struct{}), make(chan struct{})
+	c := &fakeClient{changeStarted: blocked, releaseChange: release}
+	s := New(Options{Start: serving(c, new(int))})
+	defer s.StopWait(time.Second)
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client, err := s.Get(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := editor.NewBuffer("open")
+	const uri = "file:///a.go"
+	if err = s.Sync(ctx, client, uri, buf.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	buf.Set("changed")
+	s.Changed(uri, buf.Snapshot())
+	select {
+	case <-blocked:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	for i := 0; i < 1024; i++ {
+		if !s.Open(c, string(rune(0x400+i)), buf.Snapshot()) {
+			if state, err := s.Status(); state != Failed || !errors.Is(err, errQueueFull) {
+				t.Fatalf("lost notification without failure: %v %v", state, err)
+			}
+			return
+		}
+	}
+	t.Fatal("blocked writer accepted unbounded notifications")
+}
+
+func TestBlockedWriterFailsSessionOnByteOverflow(t *testing.T) {
+	// Payload bytes, not notification count, must trip the queue bound:
+	// a few large documents behind a blocked writer cannot accumulate.
+	small := outboxMaxBytes
+	outboxMaxBytes = 1 << 20
+	defer func() { outboxMaxBytes = small }()
+
+	blocked, release := make(chan struct{}), make(chan struct{})
+	c := &fakeClient{changeStarted: blocked, releaseChange: release}
+	s := New(Options{Start: serving(c, new(int))})
+	defer s.StopWait(time.Second)
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client, err := s.Get(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := editor.NewBuffer("open")
+	const uri = "file:///a.go"
+	if err = s.Sync(ctx, client, uri, buf.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	buf.Set("changed")
+	s.Changed(uri, buf.Snapshot())
+	select {
+	case <-blocked:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	large := editor.NewBuffer(strings.Repeat("x", 256<<10))
+	for i := 0; i < 64; i++ {
+		if !s.Open(client, fmt.Sprintf("file:///big%d.go", i), large.Snapshot()) {
+			if state, err := s.Status(); state != Failed || !errors.Is(err, errQueueFull) {
+				t.Fatalf("byte overflow did not fail the session: %v %v", state, err)
+			}
+			return
+		}
+	}
+	t.Fatal("blocked writer accepted unbounded payload bytes")
 }

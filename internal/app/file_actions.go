@@ -20,7 +20,7 @@ type entryPrompt struct {
 }
 
 func (a *App) requestTrash(path string) {
-	if path == a.root || !workspace.Within(a.root, path) || a.deleteConfirm != nil {
+	if a.isWorkspaceFolder(path) || !a.withinWorkspace(path) || a.deleteConfirm != nil {
 		return
 	}
 	var dirty []*doc
@@ -47,13 +47,13 @@ func (a *App) requestTrash(path string) {
 						return
 					}
 					if err != nil {
-						a.note(locales.MsgCouldNotMoveToTrash()+err.Error(), true)
+						a.fail(locales.MsgCouldNotMoveToTrash() + err.Error())
 						return
 					}
 					a.removed(path)
 					a.refreshDir(filepath.Dir(path))
 					a.refreshGit()
-					a.quick.files = nil
+					a.quick.files, a.quick.err = nil, nil
 					a.filter.forQuery = ""
 				})
 			}()
@@ -116,7 +116,7 @@ func (a *App) entryPanel(c *ui.Context) {
 			} else {
 				fileIcon(c, q.name, 16)
 			}
-			field := ui.TextInput(c, &q.name).Label(title+locales.MsgName()).Placeholder(locales.MsgPath()).Grow(1).Height(20).Padding(0, 4).FontSize(12).AutoFocus()
+			field := ui.TextInput(c, &q.name).Label(title+locales.MsgName()).Placeholder(locales.MsgPath()).Grow(1).Height(20).Padding(0, 4).FontSize(12).TextColor(colors(c).Text).AutoFocus()
 			if field.Submitted() {
 				a.submitEntry(q)
 			}
@@ -135,12 +135,16 @@ func (a *App) submitEntry(q *entryPrompt) {
 		return
 	}
 	name := strings.TrimSpace(q.name)
-	clean := filepath.Clean(name)
-	if name == "" || filepath.IsAbs(name) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	// The name is user input relative to q.dir: normalize it through the
+	// same confined join the other root-relative inputs use, so nothing
+	// absolute, nothing with a leading .. and nothing NUL-bearing can
+	// create outside the folder it was typed in.
+	path, err := workspace.JoinRel(q.dir, name)
+	if err != nil || path == q.dir {
 		q.err = locales.MsgEnterARelativePathWithinThisFolder()
 		return
 	}
-	path, gen, post := filepath.Join(q.dir, clean), a.gen, a.post.Post
+	gen, post := a.gen, a.post.Post
 	a.createEntry = nil
 	go func() {
 		var err error
@@ -163,12 +167,12 @@ func (a *App) submitEntry(q *entryPrompt) {
 				if a.createEntry == nil {
 					a.createEntry = q
 				} else {
-					a.note(q.err, true)
+					a.fail(q.err)
 				}
 				return
 			}
 			a.refreshDir(q.dir)
-			a.quick.files = nil
+			a.quick.files, a.quick.err = nil, nil
 			a.filter.forQuery = ""
 			a.tree.Open.Add(q.dir)
 			a.revealInTree(path)
@@ -184,7 +188,7 @@ func (a *App) openDropped(g *group, zone side, paths []string) {
 	for _, path := range paths {
 		info, err := os.Stat(path)
 		if err != nil || !info.Mode().IsRegular() {
-			a.note(locales.MsgCouldNotOpenDroppedFile()+path, true)
+			a.fail(locales.MsgCouldNotOpenDroppedFile() + path)
 			continue
 		}
 		if zone != sideNone {
@@ -211,11 +215,11 @@ func (a *App) copyInto(dir string, paths []string) {
 				return
 			}
 			a.refreshDir(dir)
-			a.quick.files = nil
+			a.quick.files, a.quick.err = nil, nil
 			a.filter.forQuery = ""
 			a.tree.Open.Add(dir)
 			if len(failures) > 0 {
-				a.note(locales.MsgCouldNotCopy()+strings.Join(failures, "; "), true)
+				a.fail(locales.MsgCouldNotCopy() + strings.Join(failures, "; "))
 			}
 		})
 	}()

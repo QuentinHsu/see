@@ -125,7 +125,11 @@ func (a *App) quickButton(c *ui.Context, centered bool, x, y float32) {
 // native menu of the recent folders, with the one open checked, so the
 // window's title is also the way between projects.
 func (a *App) projectTitle(c *ui.Context) {
-	b := ui.ButtonBase(c).Label(locales.MsgSwitchProject()).Tooltip(tildePath(a.root)).
+	titlePath := a.workspaceID
+	if titlePath == "" {
+		titlePath = a.root
+	}
+	b := ui.ButtonBase(c).Label(locales.MsgSwitchProject()).Tooltip(tildePath(titlePath)).
 		Padding(0, 5, 0, 0).Radius(6).Shrink(1).Bind(&a.titleButton)
 	if b.Hovered() || b.Pressed() {
 		b.Background(colors(c).Pill)
@@ -140,7 +144,7 @@ func (a *App) projectTitle(c *ui.Context) {
 	}
 	b.Children(func() {
 		ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, filepath.Base(a.root)).Bold().SingleLine().Ellipsis("…").MinWidth(0).Shrink(1)
+			ui.Text(c, a.workspaceTitle()).Bold().SingleLine().Ellipsis("…").MinWidth(0).Shrink(1)
 			symbolIcon(c, icChevron, 9, colors(c).Dim).Shrink(0)
 		})
 	})
@@ -149,7 +153,7 @@ func (a *App) projectTitle(c *ui.Context) {
 func (a *App) projectPopoverMenu(m *ui.Menu) {
 	for _, p := range a.cfg.Recent {
 		p := p
-		if m.Item(projectLabel(a.cfg.Recent, p)).ID(p).Radio(p == a.root).Tooltip(p).Chosen() {
+		if m.Item(projectLabel(a.cfg.Recent, p)).ID(p).Radio(p == a.workspaceID).Tooltip(p).Chosen() {
 			a.openRecent(p)
 		}
 	}
@@ -172,7 +176,7 @@ func (a *App) projectMenu(x, y int) {
 			Label:   projectLabel(a.cfg.Recent, p),
 			ToolTip: p,
 			Type:    mygo.MenuItemCheckbox,
-			Checked: p == a.root,
+			Checked: p == a.workspaceID,
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.post.Post(func() { a.openRecent(p) })
 			},
@@ -268,13 +272,17 @@ func (a *App) activityView(c *ui.Context) {
 	pill := ui.Row(c).Height(16).MaxWidth(260).Shrink(1).Gap(5).AlignItems(ui.Center)
 	pill.Children(func() {
 		// The dot tells the state at a glance, as Peek's toolbar does: the
-		// accent while work goes on, red when it went wrong.
+		// accent while work goes on, red when it went wrong. Errors a
+		// operation produced are the error banner's, not the pill's: the
+		// pill holds states alone, so no event can mask them.
 		dot := colors(c).Muted
 		switch {
 		case a.finding, a.find.running, state == langserver.Starting:
 			dot = c.Theme().Accent
-		case a.noticeError, state == langserver.Failed, a.watchErr != nil:
+		case state == langserver.Failed, a.watchErr != nil:
 			dot = colors(c).Err
+		case state == langserver.Degraded:
+			dot = ui.RGB(0xff, 0x95, 0x00)
 		}
 		if dot != colors(c).Muted {
 			ui.Box(c).Size(6, 6).Radius(3).Background(dot).Shrink(0)
@@ -294,12 +302,13 @@ func (a *App) activityView(c *ui.Context) {
 			if stop.Clicked() {
 				a.stopGoTask()
 			}
-		case a.notice != "":
-			t := ui.Text(c, a.notice).FontSize(12).SingleLine().Ellipsis("…").MinWidth(0).Shrink(1)
-			if a.noticeError {
-				t.TextColor(colors(c).Err)
+		case state == langserver.Failed:
+			msg := name + " unavailable"
+			if serverErr != nil {
+				msg = name + ": " + shortErr(serverErr)
 			}
-			if state == langserver.Failed && ui.Button(c, locales.Retry()).Label(locales.MsgRetry()+name).Padding(0, 6).FontSize(11).Clicked() {
+			ui.Text(c, msg).FontSize(12).TextColor(colors(c).Err).SingleLine().Ellipsis("…").MinWidth(0).Shrink(1)
+			if ui.Button(c, locales.Retry()).Label(locales.MsgRetry()+name).Padding(0, 6).FontSize(11).Clicked() {
 				retry()
 			}
 		case a.find.running:
@@ -318,17 +327,10 @@ func (a *App) activityView(c *ui.Context) {
 		case state == langserver.Starting:
 			ui.Spinner(c).FontSize(11)
 			ui.Text(c, locales.MsgStarting()+name+"…").FontSize(12).TextColor(colors(c).Muted)
-		case state == langserver.Failed:
-			msg := name + " unavailable"
-			if serverErr != nil {
-				msg = name + ": " + shortErr(serverErr)
-			}
-			ui.Text(c, msg).FontSize(12).TextColor(colors(c).Err).SingleLine().Ellipsis("…").MinWidth(0).Shrink(1)
-			if ui.Button(c, locales.Retry()).Label(locales.MsgRetry()+name).Padding(0, 6).FontSize(11).Clicked() {
-				retry()
-			}
 		case a.watchErr != nil:
 			ui.Text(c, locales.MsgNotWatchingForChanges()).FontSize(12).TextColor(colors(c).Muted).Tooltip(a.watchErr.Error())
+		case state == langserver.Degraded:
+			ui.Text(c, locales.MsgDegraded()+name).FontSize(12).TextColor(ui.RGB(0xff, 0x95, 0x00)).Tooltip(locales.MsgDegradedExplanation())
 		case state == langserver.Ready:
 			ui.Text(c, locales.MsgReady2()+name).FontSize(12).TextColor(colors(c).Muted)
 		default:

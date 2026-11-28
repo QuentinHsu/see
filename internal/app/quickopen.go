@@ -1,16 +1,20 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"see/locales"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/egoist/mygo/i18n"
 	"github.com/egoist/mygo/ui"
 
-	"see/internal/workspace"
+	"see/internal/operr"
+	"see/internal/proc"
+
 )
 
 // quickOpenPanel searches files, or commands when the query starts with >.
@@ -55,9 +59,14 @@ func (a *App) quickOpenPanel(c *ui.Context) {
 				if targeted && q.filePath != "" {
 					ui.Row(c).Padding(5, 8).Gap(8).AlignItems(ui.Center).Children(func() {
 						fileIcon(c, filepath.Base(q.filePath), 16)
-						ui.Text(c, workspace.RelPath(a.root, q.filePath)).TextColor(colors(c).Muted).SingleLine().Ellipsis("…").MinWidth(0)
+						ui.Text(c, a.workspacePath(q.filePath)).TextColor(colors(c).Muted).SingleLine().Ellipsis("…").MinWidth(0)
 					})
 				}
+				// A workspace larger than the listing cap must not hide it: the
+				// files past the cap cannot be opened from here, so the panel
+				// says the list is partial — a bare "No Matches" would claim the
+				// file does not exist when it may sit past the cap.
+				partial := !commandMode && !symbolMode && !lineMode && q.truncated
 				switch {
 				case fileSymbolMode && !targeted && a.activeEditor() == nil:
 					ui.Text(c, locales.Catalog.Format(i18n.Locale(), "fileSymbolsOpenText", nil)).TextColor(colors(c).Muted).Padding(8)
@@ -65,8 +74,8 @@ func (a *App) quickOpenPanel(c *ui.Context) {
 					ui.Text(c, locales.Catalog.Format(i18n.Locale(), "goToLineHint", nil)).TextColor(colors(c).Muted).Padding(8)
 				case !commandMode && !lineMode && a.root == "":
 					ui.Text(c, locales.MsgOpenAFolderToSearchFilesOrType()).TextColor(colors(c).Muted).Padding(8)
-				case symbolMode && !a.cfg.IsTrusted(a.root):
-					if ui.Button(c, locales.MsgTrustFolderToSearchSymbols()).Clicked() {
+				case symbolMode && !a.workspaceTrusted():
+					if ui.Button(c, a.trustSearchButton()).Clicked() {
 						query := q.query
 						q.open = false
 						a.trustAsk = true
@@ -100,6 +109,9 @@ func (a *App) quickOpenPanel(c *ui.Context) {
 						list.Height(float32(min(len(q.results), 10)) * 36)
 					}
 				}
+				if partial {
+					ui.Text(c, locales.MsgOnlyTheFirstCountFilesAreListed(strconv.Itoa(maxQuickFiles))).FontSize(11).TextColor(colors(c).Muted).Padding(2, 8).SingleLine()
+				}
 			})
 		})
 	})
@@ -118,7 +130,7 @@ func (a *App) quickRow(c *ui.Context, i int) {
 		row.OnClick(func() { a.chooseQuick(i) })
 		row.Children(func() {
 			ui.Text(c, s.name).Grow(1).SingleLine().Ellipsis("…").MinWidth(0)
-			ui.Text(c, fmt.Sprintf("%s:%d", workspace.RelPath(a.root, s.target.path), s.target.pos.Line+1)).TextColor(colors(c).Muted).SingleLine().Ellipsis("…")
+			ui.Text(c, fmt.Sprintf("%s:%d", a.workspacePath(s.target.path), s.target.pos.Line+1)).TextColor(colors(c).Muted).SingleLine().Ellipsis("…")
 		})
 		return
 	}
@@ -155,8 +167,13 @@ func (a *App) quickRow(c *ui.Context, i int) {
 		})
 		return
 	}
-	dir, name := filepath.Split(filepath.FromSlash(r.Path))
-	row := ui.Row(c).FillWidth().Padding(5, 8).Gap(10).AlignItems(ui.Center).Radius(8)
+	label := a.workspacePath(r.Path)
+	hits := r.Hits
+	if q.fileMatchLabels[r.Path] != label {
+		hits = nil
+	}
+	dir, name := filepath.Split(filepath.FromSlash(label))
+	row := ui.Row(c.Key(r.Path)).FillWidth().Padding(5, 8).Gap(10).AlignItems(ui.Center).Radius(8)
 	if i == q.sel {
 		row.Background(c.Theme().Accent)
 	}
@@ -164,13 +181,13 @@ func (a *App) quickRow(c *ui.Context, i int) {
 	row.Children(func() {
 		fileIcon(c, name, 22)
 		ui.Column(c).Grow(1).Shrink(1).Children(func() {
-			nameStart := len(r.Path) - len(name)
-			highlightText(c, name, r.Hits, nameStart, i == q.sel)
+			nameStart := len(label) - len(name)
+			highlightText(c, name, hits, nameStart, i == q.sel)
 			color := colors(c).Muted
 			if i == q.sel {
 				color = ui.RGBA(0xff, 0xff, 0xff, 0.75)
 			}
-			highlightTextStyle(c, strings.TrimSuffix(filepath.ToSlash(dir), "/"), r.Hits, 0, 11, color)
+			highlightTextStyle(c, strings.TrimSuffix(filepath.ToSlash(dir), "/"), hits, 0, 11, color)
 		})
 	})
 }
@@ -212,6 +229,29 @@ func highlightTextStyle(c *ui.Context, name string, hits []int, off int, fontSiz
 
 func shortErr(err error) string {
 	s := err.Error()
+	var failure *operr.Error
+	if errors.As(err, &failure) {
+		switch failure.Kind {
+		case operr.PermissionDenied:
+			// Workspace binaries are never run, so this is almost always
+			// a launch denied by the trust boundary rather than a file mode.
+			s = "denied: executables inside the workspace are never run"
+			if !errors.Is(err, proc.ErrUntrustedExecutable) {
+				s = "permission denied"
+			}
+		case operr.NotFound:
+			s = "not installed"
+		case operr.Timeout:
+			s = "timed out"
+		case operr.Unexpected:
+			// The bare "unexpected (persistent)" a spent restart budget
+			// leaves says nothing: say what persistent means here, and
+			// that Retry restarts the server.
+			if failure.Status == operr.Persistent {
+				s = locales.MsgServerCrashedRepeatedly()
+			}
+		}
+	}
 	if len(s) > 80 {
 		s = s[:77] + "…"
 	}

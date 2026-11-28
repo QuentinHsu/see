@@ -12,7 +12,6 @@ import (
 	"see/internal/lsp"
 	"see/internal/shellpath"
 	"see/internal/uri"
-	"see/internal/workspace"
 )
 
 var ErrNoClangd = errors.New("clangd is not installed")
@@ -33,31 +32,24 @@ func ClangLanguage(path string) string {
 
 func FindClangd(root string) (string, error) {
 	p := os.Getenv("SEE_CLANGD")
+	explicit := p != ""
 	if p == "" {
 		p, _ = exec.LookPath("clangd")
 	}
 	if !filepath.IsAbs(p) {
 		return "", ErrNoClangd
 	}
-	resolved, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		return "", ErrNoClangd
-	}
-	realRoot := root
-	if r, err := filepath.EvalSymlinks(root); err == nil {
-		realRoot = r
-	}
-	if root != "" && (workspace.Within(root, p) || workspace.Within(realRoot, resolved)) {
-		return "", ErrNoClangd
-	}
-	if fi, err := os.Stat(resolved); err != nil || !fi.Mode().IsRegular() {
+	if err, denied := validateCandidate(root, p); err != nil {
+		if denied && explicit {
+			return "", err
+		}
 		return "", ErrNoClangd
 	}
 	return p, nil
 }
 
 func StartClangd(logf func(string, ...any)) langserver.Starter {
-	return func(ctx context.Context, root string, onExit func(error)) (langserver.Client, error) {
+	return func(ctx context.Context, root string, folders []lsp.WorkspaceFolder, onExit func(error)) (langserver.Client, error) {
 		if err := shellpath.Wait(ctx); err != nil {
 			return nil, err
 		}
@@ -65,12 +57,12 @@ func StartClangd(logf func(string, ...any)) langserver.Starter {
 		if err != nil {
 			return nil, err
 		}
-		return lsp.Start(ctx, p, nil, lsp.Options{RootPath: root, RootURI: uri.FromPath(root), Name: filepath.Base(root), Logf: logf, OnExit: onExit})
+		return lsp.Start(ctx, p, nil, lsp.Options{RootPath: root, RootURI: uri.FromPath(root), WorkspaceFolders: folders, Name: filepath.Base(root), Logf: logf, OnExit: onExit})
 	}
 }
 
-func NewClangdServer(root string, onState func(langserver.State, error), onDiagnostics langserver.DiagnosticsHandler, logf func(string, ...any)) *langserver.Server {
-	return langserver.New(langserver.Options{Name: "clangd", Root: root, Start: StartClangd(logf), Language: ClangLanguage, OnState: onState, OnDiagnostics: onDiagnostics, Logf: logf, Recover: func(err error) bool {
+func NewClangdServer(root string, folders []lsp.WorkspaceFolder, onState func(langserver.State, error), onDiagnostics langserver.DiagnosticsHandler, logf func(string, ...any)) *langserver.Server {
+	return langserver.New(langserver.Options{Name: "clangd", Root: root, Folders: folders, Start: StartClangd(logf), Language: ClangLanguage, OnState: onState, OnDiagnostics: onDiagnostics, Logf: logf, Recover: func(err error) bool {
 		if !errors.Is(err, ErrNoClangd) {
 			return false
 		}
@@ -90,31 +82,24 @@ func CMakeLanguage(path string) string {
 
 func FindCMakeServer(root string) (string, error) {
 	p := os.Getenv("SEE_CMAKE_LANGUAGE_SERVER")
+	explicit := p != ""
 	if p == "" {
 		p, _ = exec.LookPath("cmake-language-server")
 	}
 	if !filepath.IsAbs(p) {
 		return "", ErrNoCMakeServer
 	}
-	resolved, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		return "", ErrNoCMakeServer
-	}
-	realRoot := root
-	if r, err := filepath.EvalSymlinks(root); err == nil {
-		realRoot = r
-	}
-	if root != "" && (workspace.Within(root, p) || workspace.Within(realRoot, resolved)) {
-		return "", ErrNoCMakeServer
-	}
-	if fi, err := os.Stat(resolved); err != nil || !fi.Mode().IsRegular() {
+	if err, denied := validateCandidate(root, p); err != nil {
+		if denied && explicit {
+			return "", err
+		}
 		return "", ErrNoCMakeServer
 	}
 	return p, nil
 }
 
-func NewCMakeServer(root string, onState func(langserver.State, error), onDiagnostics langserver.DiagnosticsHandler, logf func(string, ...any)) *langserver.Server {
-	start := func(ctx context.Context, root string, onExit func(error)) (langserver.Client, error) {
+func NewCMakeServer(root string, folders []lsp.WorkspaceFolder, onState func(langserver.State, error), onDiagnostics langserver.DiagnosticsHandler, logf func(string, ...any)) *langserver.Server {
+	start := func(ctx context.Context, root string, folders []lsp.WorkspaceFolder, onExit func(error)) (langserver.Client, error) {
 		if err := shellpath.Wait(ctx); err != nil {
 			return nil, err
 		}
@@ -122,9 +107,9 @@ func NewCMakeServer(root string, onState func(langserver.State, error), onDiagno
 		if err != nil {
 			return nil, err
 		}
-		return lsp.Start(ctx, p, nil, lsp.Options{RootPath: root, RootURI: uri.FromPath(root), Name: filepath.Base(root), Logf: logf, OnExit: onExit})
+		return lsp.Start(ctx, p, nil, lsp.Options{RootPath: root, RootURI: uri.FromPath(root), WorkspaceFolders: folders, Name: filepath.Base(root), Logf: logf, OnExit: onExit})
 	}
-	return langserver.New(langserver.Options{Name: "cmake-language-server", Root: root, Start: start, Language: CMakeLanguage, OnState: onState, OnDiagnostics: onDiagnostics, Logf: logf, Recover: func(err error) bool {
+	return langserver.New(langserver.Options{Name: "cmake-language-server", Root: root, Folders: folders, Start: start, Language: CMakeLanguage, OnState: onState, OnDiagnostics: onDiagnostics, Logf: logf, Recover: func(err error) bool {
 		if !errors.Is(err, ErrNoCMakeServer) {
 			return false
 		}

@@ -3,18 +3,21 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/editor"
 
+	"see/internal/atomicfile"
 	"see/internal/langserver"
 	"see/internal/lsp"
+	"see/internal/operr"
 	"see/internal/uri"
 	"see/internal/workspace"
 	"see/locales"
@@ -28,6 +31,7 @@ type codeActionClient interface {
 	CodeActionKinds() []string
 	CodeActions(ctx context.Context, uri string, r lsp.Range, diagnostics []lsp.Diagnostic) ([]lsp.CodeAction, error)
 	ResolveCodeAction(ctx context.Context, action lsp.CodeAction) (*lsp.CodeAction, error)
+	SupportsCommand(string) bool
 	ExecuteCommand(ctx context.Context, command lsp.Command) error
 }
 
@@ -91,22 +95,22 @@ func (a *App) codeActionAtPoint(g *group, d *doc, st *editor.State, caret bool) 
 	a.observeFocusedGroup(g)
 	m := a.serverFor(d.path)
 	if m == nil {
-		a.note(locales.MsgNoLanguageServerIsConfiguredForThisFile(), false)
+		a.flash(locales.MsgNoLanguageServerIsConfiguredForThisFile())
 		return
 	}
-	if !a.cfg.IsTrusted(a.root) {
+	if !a.workspaceTrusted() {
 		a.trustAsk = true
 		a.afterTrust = func() { a.codeActionAt(g, d, st) }
 		return
 	}
 	c := m.Current()
 	if c == nil {
-		a.note(locales.MsgCodeActionUnavailable(), false)
+		a.flash(locales.MsgCodeActionUnavailable())
 		return
 	}
 	ca, ok := c.(codeActionClient)
 	if !ok || !ca.HasCodeActions() {
-		a.note(locales.CodeActionUnsupported(), false)
+		a.flash(locales.CodeActionUnsupported())
 		return
 	}
 	a.cancelNav()
@@ -127,7 +131,6 @@ func (a *App) codeActionAtPoint(g *group, d *doc, st *editor.State, caret bool) 
 	a.navCancel = cancel
 	a.finding = true
 	a.findingLabel = locales.CodeActionFinding()
-	a.notice = ""
 	go func() {
 		defer cancel()
 		if err := m.Sync(ctx, c, d.uri, snap); err != nil {
@@ -153,7 +156,7 @@ func (a *App) codeActionAtPoint(g *group, d *doc, st *editor.State, caret bool) 
 				return
 			}
 			if len(actions) == 0 {
-				a.note(locales.CodeActionEmpty(), false)
+				a.flash(locales.CodeActionEmpty())
 				return
 			}
 			a.codeActions = &codeActions{doc: d, server: m, client: ca, line: line, version: version, anchor: anchor, list: actions, open: true}
@@ -381,20 +384,17 @@ func (a *App) resolveCodeAction(cs *codeActions, action lsp.CodeAction) {
 // applyCodeAction applies the action's workspace edit across the docs
 // it touches, then runs its command if it has one.
 func (a *App) applyCodeAction(cs *codeActions, action *lsp.CodeAction) {
+	if action.Command != nil && (cs.client == nil || !cs.client.SupportsCommand(action.Command.Command)) {
+		a.flash(locales.CodeActionNoCommands())
+		return
+	}
 	if action.Edit != nil {
-		if n := action.Edit.ResourceChanges(); n > 0 {
-			a.note(locales.CodeActionResourceChanges(strconv.Itoa(n)), true)
-		}
 		if err := a.applyWorkspaceEdit(action.Edit, cs.server); err != nil {
 			a.lspFailure(err)
 			return
 		}
 	}
 	if action.Command != nil {
-		if ec, ok := cs.client.(interface{ HasExecuteCommand() bool }); !ok || !ec.HasExecuteCommand() {
-			a.note(locales.CodeActionNoCommands(), false)
-			return
-		}
 		a.executeCommand(cs, *action.Command)
 	}
 }
@@ -426,28 +426,68 @@ func (a *App) executeCommand(cs *codeActions, command lsp.Command) {
 // one that is not open through its file on disk, which the next open or
 // the file watcher's reload picks up.
 func (a *App) applyWorkspaceEdit(edit *lsp.WorkspaceEdit, m *langserver.Server) error {
-	for _, docURI := range edit.EditURIs() {
+	// Validate the whole edit before mutating the first buffer or file.
+	for _, raw := range edit.DocumentChanges {
+		var change lsp.TextDocumentEdit
+		if json.Unmarshal(raw, &change) != nil || change.TextDocument.URI == "" || change.Edits == nil {
+			return editRejected(operr.Unsupported)
+		}
+		for _, rawEdit := range change.Edits {
+			var entry struct {
+				Range        *lsp.Range
+				NewText      *string
+				AnnotationID *string
+			}
+			if json.Unmarshal(rawEdit, &entry) != nil || entry.Range == nil || entry.NewText == nil || entry.AnnotationID != nil {
+				return editRejected(operr.Unsupported)
+			}
+		}
+		if version := change.TextDocument.Version; version != nil {
+			path, err := uri.ToPath(change.TextDocument.URI)
+			if err != nil {
+				return editRejected(operr.Unsupported)
+			}
+			path = workspace.DiskSpelling(a.docPath(path))
+			d := a.docs[path]
+			if d == nil || d.buf == nil || m == nil || !m.MatchesDocumentVersion(change.TextDocument.URI, *version, d.buf.Version()) {
+				return editRejected(operr.Conflict)
+			}
+		}
+	}
+	uris := edit.EditURIs()
+	paths := make(map[string]string, len(uris))
+	for _, docURI := range uris {
 		path, err := uri.ToPath(docURI)
 		if err != nil {
-			continue // a URI that is not a file is not ours to edit
+			return editRejected(operr.Unsupported)
 		}
+		// The server's spelling of the path is not the disk's; writing or
+		// looking the document up by it unchanged would split one file
+		// into two identities. The trusted server may legitimately edit
+		// files outside the workspace, so the path is canonicalized, not
+		// confined.
+		paths[docURI] = workspace.DiskSpelling(a.docPath(path))
+	}
+	enc := lsp.UTF16
+	if m != nil {
+		if c := m.Current(); c != nil {
+			enc = c.Encoding()
+		}
+	}
+	for _, docURI := range uris {
+		path := paths[docURI]
 		edits := edit.EditsFor(docURI)
 		if len(edits) == 0 {
 			continue
 		}
-		path = workspace.DocPath(a.root, a.realRoot, path)
 		d := a.docs[path]
 		if d == nil || d.buf == nil {
-			if err := applyEditsToFile(path, edits); err != nil {
+			if err := applyEditsToFile(path, edits, enc); err != nil {
 				return err
 			}
 			continue
 		}
 		snap := d.buf.Snapshot()
-		enc := "utf-16"
-		if c := m.Current(); c != nil {
-			enc = c.Encoding()
-		}
 		bufEdits := lsp.ApplyTextEdits(snap, edits, enc)
 		if len(bufEdits) > 0 {
 			d.buf.EditRemote(bufEdits...)
@@ -457,10 +497,17 @@ func (a *App) applyWorkspaceEdit(edit *lsp.WorkspaceEdit, m *langserver.Server) 
 	return nil
 }
 
+func editRejected(kind operr.Kind) error {
+	e := operr.New(kind, operr.Permanent, nil)
+	e.Operation = "workspace/applyEdit"
+	e.Finality = operr.NoEffect
+	return e
+}
+
 // applyEditsToFile edits a file that has no open buffer: the text read,
 // TextEdits applied against it in reverse order so earlier offsets stay
 // true, and written back with the BOM it had.
-func applyEditsToFile(path string, edits []lsp.TextEdit) error {
+func applyEditsToFile(path string, edits []lsp.TextEdit, enc string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -471,7 +518,6 @@ func applyEditsToFile(path string, edits []lsp.TextEdit) error {
 		text = text[3:]
 	}
 	snap := editor.NewBuffer(text).Snapshot()
-	enc := "utf-16"
 	// ApplyTextEdits needs a snapshot, but its offsets are byte offsets of
 	// the text itself: a fresh buffer of the same text has them.
 	sortEdits := lsp.ApplyTextEdits(snap, edits, enc)
@@ -487,5 +533,8 @@ func applyEditsToFile(path string, edits []lsp.TextEdit) error {
 		out.WriteString("\xef\xbb\xbf")
 	}
 	out.WriteString(text)
-	return os.WriteFile(path, out.Bytes(), 0o644)
+	return atomicfile.WriteFile(path, func(w io.Writer) error {
+		_, err := w.Write(out.Bytes())
+		return err
+	})
 }

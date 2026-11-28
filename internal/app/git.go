@@ -22,6 +22,7 @@ import (
 type gitState struct {
 	root, branch, message  string
 	repositories           []string
+	repositoryLabels       map[string]string
 	repositoriesLoaded     bool
 	repositoryScanLoading  bool
 	repositoryScanSeq      uint64
@@ -284,7 +285,7 @@ func (a *App) startGit() {
 		return
 	}
 	a.git.autoFetch = true
-	if a.cfg.GitAutoDiscover {
+	if a.gitRepositorySelectionEnabled() {
 		a.scanGitRepositories()
 	} else {
 		a.refreshGit()
@@ -300,7 +301,7 @@ func (a *App) startGit() {
 			case <-t.C:
 				a.post.Post(func() {
 					if a.gen == gen {
-						if a.cfg.GitAutoDiscover {
+						if a.gitRepositorySelectionEnabled() {
 							a.scanGitRepositories()
 						}
 						a.refreshGit()
@@ -317,7 +318,7 @@ func (a *App) refreshGit() {
 	}
 	a.refreshGitWorkingCopies()
 	root := a.root
-	if a.cfg.GitAutoDiscover {
+	if a.gitRepositorySelectionEnabled() {
 		if !a.git.repositoriesLoaded {
 			a.scanGitRepositories()
 			return
@@ -412,41 +413,130 @@ func (a *App) refreshGitDiscovery() {
 	a.git.loading, a.git.pending, a.git.busy = false, false, false
 	a.git.autoFetching, a.git.syncing, a.git.stashing = false, "", false
 	a.git.resolvingPath = ""
-	if a.cfg.GitAutoDiscover {
+	if a.gitRepositorySelectionEnabled() {
 		a.git.repositoriesLoaded = false
+		a.git.repositoryLabels = nil
 		a.git.err = ""
 		a.scanGitRepositories()
 		return
 	}
 	a.git.repositories = nil
+	a.git.repositoryLabels = nil
 	a.git.repositoriesLoaded = false
 	a.git.workingCopies = nil
 	a.selectGitRepository("")
 	a.refreshGit()
 }
 
+type repositoryWorkspaceRoot struct {
+	path, realPath, label string
+}
+
+func repositoryLabelsForWorkspace(repositories []string, roots []repositoryWorkspaceRoot) map[string]string {
+	labels := make(map[string]string, len(repositories))
+	for _, repository := range repositories {
+		label := filepath.Base(repository)
+		longest := -1
+		for _, root := range roots {
+			for _, prefix := range []string{root.path, root.realPath} {
+				if prefix == "" {
+					continue
+				}
+				relative, err := filepath.Rel(prefix, repository)
+				if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) || len(prefix) <= longest {
+					continue
+				}
+				switch {
+				case relative == ".":
+					label = root.label
+				case len(roots) > 1:
+					label = filepath.ToSlash(filepath.Join(root.label, relative))
+				default:
+					label = filepath.ToSlash(relative)
+				}
+				longest = len(prefix)
+			}
+		}
+		labels[repository] = label
+	}
+	return labels
+}
+
 func (a *App) scanGitRepositories() {
-	if !a.cfg.GitAutoDiscover || a.root == "" || a.wsCtx == nil || a.git.repositoryScanLoading {
+	if !a.gitRepositorySelectionEnabled() || a.root == "" || a.wsCtx == nil || a.git.repositoryScanLoading {
 		return
 	}
 	a.git.repositoryScanSeq++
 	a.git.repositoryScanLoading = true
 	seq, gen, scopeSeq, ctx, workspaceRoot := a.git.repositoryScanSeq, a.gen, a.git.scopeSeq, a.wsCtx, a.realRoot
+	roots := a.workspaceFolderPaths()
+	workspaceRoots := make([]repositoryWorkspaceRoot, 0, len(a.workspaceFolders))
+	for _, folder := range a.workspaceFolders {
+		workspaceRoots = append(workspaceRoots, repositoryWorkspaceRoot{path: folder.Path, label: a.workspaceFolderLabel(folder.Path)})
+	}
+	autoDiscover := a.cfg.GitAutoDiscover
 	go func() {
-		repositories, err := git.DiscoverRepositories(ctx, workspaceRoot)
+		for i := range workspaceRoots {
+			workspaceRoots[i].realPath = workspaceRoots[i].path
+			if resolved, err := filepath.EvalSymlinks(workspaceRoots[i].path); err == nil {
+				workspaceRoots[i].realPath = resolved
+			}
+		}
+		var repositories []string
+		var err error
+		if len(roots) > 1 {
+			seen := map[string]bool{}
+			for _, folderRoot := range roots {
+				if autoDiscover {
+					found, discoverErr := git.DiscoverRepositories(ctx, folderRoot)
+					if discoverErr != nil {
+						if ctx.Err() != nil {
+							err = ctx.Err()
+							break
+						}
+						continue
+					}
+					for _, root := range found {
+						if !seen[root] {
+							seen[root] = true
+							repositories = append(repositories, root)
+						}
+					}
+				} else {
+					s, syncErr := git.Sync(ctx, folderRoot, false)
+					if syncErr != nil {
+						if ctx.Err() != nil {
+							err = ctx.Err()
+							break
+						}
+						continue
+					}
+					if s.Root != "" && !seen[s.Root] {
+						seen[s.Root] = true
+						repositories = append(repositories, s.Root)
+					}
+				}
+			}
+			slices.Sort(repositories)
+		} else {
+			repositories, err = git.DiscoverRepositories(ctx, workspaceRoot)
+		}
+		labels := repositoryLabelsForWorkspace(repositories, workspaceRoots)
 		a.post.Post(func() {
-			if a.gen != gen || a.git.repositoryScanSeq != seq || a.git.scopeSeq != scopeSeq || !a.cfg.GitAutoDiscover {
+			if a.gen != gen || a.git.repositoryScanSeq != seq || a.git.scopeSeq != scopeSeq || !a.gitRepositorySelectionEnabled() {
 				return
 			}
 			a.git.repositoryScanLoading = false
 			a.git.repositoriesLoaded = true
 			if err != nil {
 				a.git.repositories = nil
+				a.git.repositoryLabels = nil
 				a.git.err = err.Error()
 				a.reconcileGitWorkingCopies()
 				return
 			}
 			a.git.repositories = repositories
+			a.git.repositoryLabels = labels
 			a.reconcileGitWorkingCopies()
 			a.git.err = ""
 			selected := a.git.root
@@ -671,12 +761,12 @@ func (a *App) gitAction(args ...string) {
 			}
 			a.git.busy = false
 			if err != nil {
-				a.note(locales.MsgGit()+err.Error(), true)
+				a.fail(locales.MsgGit() + err.Error())
 			} else {
 				a.git.diffSeq++
 				if args[0] == "commit" {
 					a.git.message = ""
-					a.note(locales.MsgCommittedStagedChanges(), false)
+					a.flash(locales.MsgCommittedStagedChanges())
 				}
 			}
 			a.refreshGit()
@@ -684,12 +774,27 @@ func (a *App) gitAction(args ...string) {
 	}()
 }
 
+// gitFilePath joins the path git reports of a change into its root,
+// false when the report is malformed. Git never reports a path out of
+// its tree, but discarding a change writes or trashes what this joins,
+// so the join is validated rather than trusted.
+func gitFilePath(root, rel string) (string, bool) {
+	if !workspace.ValidRel(rel) {
+		return "", false
+	}
+	p, err := workspace.JoinRel(root, rel)
+	return p, err == nil
+}
+
 func (a *App) openGitFile(ch git.Change) {
 	a.openGitFileIn(a.git.root, ch)
 }
 
 func (a *App) openGitFileIn(root string, ch git.Change) {
-	path := filepath.Join(root, filepath.FromSlash(ch.Path))
+	path, ok := gitFilePath(root, ch.Path)
+	if !ok {
+		return
+	}
 	a.term.maximized = false
 	if root == a.git.root {
 		a.git.diffSeq++
@@ -701,9 +806,13 @@ func (a *App) discardGitChange(ch git.Change) {
 	if a.git.busy || a.git.root == "" || a.deleteConfirm != nil {
 		return
 	}
-	path := workspace.DocPath(a.root, a.realRoot, filepath.Join(a.git.root, filepath.FromSlash(ch.Path)))
+	joined, ok := gitFilePath(a.git.root, ch.Path)
+	if !ok {
+		return
+	}
+	path := workspace.DocPath(a.root, a.realRoot, joined)
 	if d := a.docs[path]; d != nil && d.buf != nil && d.buf.Modified() {
-		a.note(locales.MsgSaveOrCloseTheFileSUnsavedEdits(), true)
+		a.fail(locales.MsgSaveOrCloseTheFileSUnsavedEdits())
 		return
 	}
 	message := locales.DiscardFileQuestion(ch.Path)
@@ -718,7 +827,7 @@ func (a *App) discardGitChange(ch git.Change) {
 			}
 			a.deleteConfirm = nil
 			if d := a.docs[path]; d != nil && d.buf != nil && d.buf.Modified() {
-				a.note(locales.MsgSaveOrCloseTheFileSUnsavedEdits(), true)
+				a.fail(locales.MsgSaveOrCloseTheFileSUnsavedEdits())
 				return
 			}
 			a.git.busy = true
@@ -736,7 +845,7 @@ func (a *App) discardGitChange(ch git.Change) {
 					}
 					a.git.busy = false
 					if err != nil {
-						a.note(locales.MsgCouldNotDiscardGitChanges()+err.Error(), true)
+						a.fail(locales.MsgCouldNotDiscardGitChanges() + err.Error())
 					} else {
 						a.git.diffSeq++
 						if ch.Index == '?' {
@@ -745,7 +854,7 @@ func (a *App) discardGitChange(ch git.Change) {
 							a.reloadDoc(d)
 						}
 						a.refreshDir(filepath.Dir(path))
-						a.quick.files = nil
+						a.quick.files, a.quick.err = nil, nil
 						a.filter.forQuery = ""
 					}
 					a.refreshGit()
@@ -766,9 +875,13 @@ func (a *App) discardGitChanges(chs []git.Change) {
 		return
 	}
 	for _, ch := range chs {
-		path := workspace.DocPath(a.root, a.realRoot, filepath.Join(a.git.root, filepath.FromSlash(ch.Path)))
+		joined, ok := gitFilePath(a.git.root, ch.Path)
+		if !ok {
+			continue
+		}
+		path := workspace.DocPath(a.root, a.realRoot, joined)
 		if d := a.docs[path]; d != nil && d.buf != nil && d.buf.Modified() {
-			a.note(locales.MsgSaveOrCloseTheFileSUnsavedEdits(), true)
+			a.fail(locales.MsgSaveOrCloseTheFileSUnsavedEdits())
 			return
 		}
 	}
@@ -785,7 +898,11 @@ func (a *App) discardGitChanges(chs []git.Change) {
 			go func() {
 				var firstErr error
 				for _, ch := range chs {
-					path := workspace.DocPath(a.root, a.realRoot, filepath.Join(root, filepath.FromSlash(ch.Path)))
+					joined, ok := gitFilePath(root, ch.Path)
+					if !ok {
+						continue
+					}
+					path := workspace.DocPath(a.root, a.realRoot, joined)
 					var err error
 					if ch.Index == '?' {
 						err = trash(path)
@@ -814,10 +931,10 @@ func (a *App) discardGitChanges(chs []git.Change) {
 					}
 					a.git.busy = false
 					if firstErr != nil {
-						a.note(locales.MsgCouldNotDiscardGitChanges()+firstErr.Error(), true)
+						a.fail(locales.MsgCouldNotDiscardGitChanges() + firstErr.Error())
 					} else {
 						a.git.diffSeq++
-						a.quick.files = nil
+						a.quick.files, a.quick.err = nil, nil
 						a.filter.forQuery = ""
 					}
 					a.refreshGit()
@@ -1004,11 +1121,11 @@ func (a *App) showGitDiffInRepository(root string, ch git.Change, staged bool, t
 				return
 			}
 			if err != nil {
-				a.note(locales.MsgGitDiff()+err.Error(), true)
+				a.fail(locales.MsgGitDiff() + err.Error())
 				return
 			}
 			if view.file.OldName == "" && view.file.NewName == "" {
-				a.note(locales.MsgNoTextDiffAvailableFor()+ch.Path, true)
+				a.fail(locales.MsgNoTextDiffAvailableFor() + ch.Path)
 				return
 			}
 			v := &gitDiffTab{name: ch.Path, root: root, staged: staged, change: true}
@@ -1029,7 +1146,7 @@ func (a *App) showGitDiffInRepository(root string, ch git.Change, staged bool, t
 }
 
 func (a *App) gitNavigator(c *ui.Context) {
-	if a.git.root == "" && !a.cfg.GitAutoDiscover {
+	if a.git.root == "" && !a.gitRepositorySelectionEnabled() {
 		msg := locales.GitLookingForRepository()
 		if a.git.err != "" {
 			msg = locales.GitNoRepositoryFound()
@@ -1048,7 +1165,7 @@ func (a *App) gitNavigator(c *ui.Context) {
 	}
 	if a.git.root == "" {
 		msg := locales.GitLookingForRepository()
-		if a.cfg.GitAutoDiscover && len(a.git.repositories) > 0 {
+		if a.gitRepositorySelectionEnabled() && len(a.git.repositories) > 0 {
 			msg = locales.GitSelectRepositoryToSeeChanges()
 		}
 		if a.git.err != "" {
