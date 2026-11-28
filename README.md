@@ -66,7 +66,7 @@ Use `see` or `see .` for the current folder, `see /path/to/project` to open a fo
 - **Branch and sync** — switch or create branches from the branch name in the toolbar, and fetch, pull and push, with incoming and outgoing commits counted. Local status refreshes every five seconds. See fetches on opening a repository and every two minutes afterward; fetching updates remote references without changing your files. External pushes, fetches and tags also refresh the history on the next local status check.
 - **Link** — copy a reference to the selected lines, or their link on GitHub, GitLab and similar hosts.
 - **Preview** — Markdown, images, and native video playback, plus hexadecimal bytes for saved files. macOS also offers Quick Look from the file navigator.
-- **Run** — a terminal with tabs and split panes, rooted in the open workspace.
+- **Run** — a terminal of tabs and split panes, each pane a card with its program, title and directory, rooted in the open workspace.
 - **Settle in** — system, light, or dark appearance, editor and terminal preferences, recent folders, and a notice when files change on disk.
 
 ## Working with files
@@ -185,9 +185,17 @@ These are the macOS shortcuts; on other platforms, use Ctrl in place of Cmd. The
 | Close tab (the window, once no tab is left) | Cmd+W |
 | Toggle terminal | Cmd+Shift+Y or Ctrl+` |
 | New terminal | Ctrl+Shift+` |
+| New terminal tab (terminal focused) | Cmd+T |
+| Split terminal right / down | Cmd+D / Cmd+Shift+D |
+| Close terminal pane / tab | Cmd+W / Cmd+Shift+W |
+| Zoom / unzoom the terminal pane | Cmd+Shift+Enter |
+| Focus the terminal pane in a direction | Option+Cmd+←/→/↑/↓ |
+| Switch terminal tabs | Cmd+1–9, Cmd+Shift+[ / ] |
+| Rename terminal tab | Cmd+Shift+R |
+| Clear terminal | Cmd+K |
 | Settings | Cmd+, |
 
-When a terminal has focus, Cmd+D splits the terminal instead of adding an editor.
+When a terminal has focus, the keys above act on the terminal: Cmd+D splits it instead of adding an editor, Cmd+W closes a pane instead of a tab, and Cmd+1–9 switch terminal tabs instead of editor tabs. Split panes are resized by dragging the gap between them—the pointer shows the direction—and a double click on the gap puts the split back at half.
 
 ## Development
 

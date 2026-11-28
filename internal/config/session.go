@@ -21,8 +21,8 @@ type Workspace struct {
 	RegexToolY      float32 `json:"regexToolY,omitempty"`
 	RegexToolWidth  float32 `json:"regexToolWidth,omitempty"`
 	RegexToolHeight float32 `json:"regexToolHeight,omitempty"`
-	// Terminals are the panel's tabs, each its shells side by side; a
-	// shell's scrollback and command history are not kept.
+	// Terminals are the panel's tabs, each its shells and their splits;
+	// a shell's scrollback and command history are not kept.
 	Terminals      []TermTab `json:"terminals,omitempty"`
 	PanelOpen      bool      `json:"panelOpen,omitempty"`
 	ActiveTerminal int       `json:"activeTerminal,omitempty"`
@@ -37,10 +37,29 @@ type WorkspaceFolder struct {
 	Name string `json:"name,omitempty"`
 }
 
-// TermTab is a terminal tab of the bottom panel: shells side by side.
+// TermTab is a terminal tab of the bottom panel: the panes the user
+// named it for, its shells, the one that had the focus, and its splits.
 type TermTab struct {
+	Name   string     `json:"name,omitempty"`
 	Panes  []TermPane `json:"panes,omitempty"`
 	Active int        `json:"active,omitempty"`
+	// Root is the tree the panes split in; sessions saved before it
+	// laid them side by side.
+	Root *TermLayout `json:"root,omitempty"`
+	// Zoom is the pane the tab shows alone, as an index into Panes plus
+	// one, or zero for none.
+	Zoom int `json:"zoom,omitempty"`
+}
+
+// TermLayout is a node of a terminal tab's split tree: a pane, by its
+// index in the tab's Panes, or two nodes split across.
+type TermLayout struct {
+	Pane     int         `json:"pane,omitempty"`
+	Leaf     bool        `json:"leaf,omitempty"`
+	Vertical bool        `json:"vertical,omitempty"`
+	Ratio    float32     `json:"ratio,omitempty"`
+	First    *TermLayout `json:"first,omitempty"`
+	Second   *TermLayout `json:"second,omitempty"`
 }
 
 // TermPane is one shell of a terminal tab: the directory it worked in

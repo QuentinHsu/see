@@ -21,8 +21,8 @@ func TestTermSessionCapturesTabsPanesAndPanel(t *testing.T) {
 		open: true,
 		view: panelTerminal,
 		tabs: []*termTab{
-			{id: 1, panes: []*termPane{p1, p2}, active: p2},
-			{id: 3, panes: []*termPane{p3}, active: p3},
+			{id: 1, root: &termNode{id: 1, first: &termNode{id: 1, pane: p1}, second: &termNode{id: 2, pane: p2}, ratio: 50}, active: p2},
+			{id: 3, root: &termNode{id: 3, pane: p3}, active: p3},
 		},
 		active: nil,
 	}
@@ -87,7 +87,7 @@ func TestSessionRoundTripKeepsTerminalLayout(t *testing.T) {
 	h := newHarness(t, writeTree(t, map[string]string{"a.txt": "text"}))
 	h.open("a.txt")
 	p := &termPane{id: 1, title: "work"}
-	h.a.term = termPanel{open: true, view: panelTerminal, tabs: []*termTab{{id: 1, panes: []*termPane{p}, active: p}}}
+	h.a.term = termPanel{open: true, view: panelTerminal, tabs: []*termTab{{id: 1, root: &termNode{id: 1, pane: p}, active: p}}}
 	h.a.term.active = h.a.term.tabs[0]
 	h.a.cfg.SetPath(filepath.Join(t.TempDir(), "config.json"))
 	h.a.captureSession()

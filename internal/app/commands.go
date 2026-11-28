@@ -142,6 +142,33 @@ func commandsFor(goos string) []command {
 		{"tasks.stop", "Tasks: Stop", "", "", 0, 0, func(a *App) { a.stopGoTask() }},
 		{"output.show", "Show Output", "", "", 0, 0, func(a *App) { a.term.open = true; a.term.view = panelOutput; a.term.focus = nil }},
 		{"terminal.new", "New Terminal", "Ctrl+Shift+", "`", ui.Ctrl | ui.Shift, ui.KeyBackquote, func(a *App) { a.newTerminalTab() }},
+		{"terminal.splitRight", "Split Terminal Right", "Cmd+", "D", 0, 0, func(a *App) { a.splitTerminal(false) }},
+		{"terminal.splitDown", "Split Terminal Down", "Cmd+Shift+", "D", 0, 0, func(a *App) { a.splitTerminal(true) }},
+		{"terminal.zoom", "Zoom Terminal Pane", "", "", 0, 0, func(a *App) { a.toggleTermZoom() }},
+		{"terminal.unzoom", "Show All Panes", "", "", 0, 0, func(a *App) { a.toggleTermZoom() }},
+		{"terminal.closePane", "Close Terminal Pane", "Cmd+", "W", 0, 0, func(a *App) {
+			if tab := a.term.active; tab != nil && tab.active != nil {
+				a.closePane(tab.active)
+			}
+		}},
+		{"terminal.closeTab", "Close Terminal Tab", "", "", 0, 0, func(a *App) {
+			if tab := a.term.active; tab != nil {
+				a.closeTermTab(tab)
+			}
+		}},
+		{"terminal.nextTab", "Next Terminal Tab", "Cmd+Shift+", "]", 0, 0, func(a *App) { a.cycleTermTab(1) }},
+		{"terminal.previousTab", "Previous Terminal Tab", "Cmd+Shift+", "[", 0, 0, func(a *App) { a.cycleTermTab(-1) }},
+		{"terminal.renameTab", "Rename Terminal Tab", "", "", 0, 0, func(a *App) {
+			if tab := a.term.active; tab != nil {
+				a.selectTermTab(tab)
+				a.startTermRename(tab)
+			}
+		}},
+		{"terminal.clear", "Clear Terminal", "Cmd+", "K", 0, 0, func(a *App) {
+			if tab := a.term.active; tab != nil && tab.active != nil && tab.active.term != nil {
+				tab.active.term.ClearScreen()
+			}
+		}},
 		{"terminal.openExternal", "Open in External Terminal", "Cmd+Shift+", "C", ui.Cmd | ui.Shift, ui.KeyC, func(a *App) { a.openExternalTerminal() }},
 		{"app.settings", "Settings", "Cmd+", ",", ui.Cmd, ui.KeyComma, func(a *App) {
 			a.host.OpenSettings()

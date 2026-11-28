@@ -46,7 +46,7 @@ func (a *App) serverStateLog(source string, state langserver.State, err error) {
 func (a *App) logView(c *ui.Context) {
 	ui.Column(c).Fill().Children(func() {
 		ui.Row(c).FillWidth().Padding(6, 12).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, locales.MsgOutput()).Bold().Grow(1)
+			ui.Box(c).Grow(1)
 			if ui.Button(c, locales.MsgClear()).Label(locales.MsgClearOutput()).Clicked() {
 				a.logs.Clear()
 			}

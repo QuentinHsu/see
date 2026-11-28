@@ -1247,5 +1247,22 @@
   "msgServerCrashedRepeatedly": "crashed repeatedly — restart it with Retry",
   "errorBannerMore": "{count, plural, one { +# more} other { +# more}}",
   "review": "Review",
-  "msgConfigLoadProblem": "Some settings could not be loaded and were reset to defaults: {detail}"
+  "msgConfigLoadProblem": "Some settings could not be loaded and were reset to defaults: {detail}",
+  "commandSplitTerminalRight": "Split Terminal Right",
+  "commandSplitTerminalDown": "Split Terminal Down",
+  "commandZoomTerminalPane": "Zoom Terminal Pane",
+  "commandUnzoomTerminalPane": "Show All Panes",
+  "commandCloseTerminalPane": "Close Terminal Pane",
+  "commandCloseTerminalTab": "Close Terminal Tab",
+  "commandNextTerminalTab": "Next Terminal Tab",
+  "commandPreviousTerminalTab": "Previous Terminal Tab",
+  "commandRenameTerminalTab": "Rename Terminal Tab",
+  "commandClearTerminal": "Clear Terminal",
+  "msgCloseTab": "Close Tab",
+  "msgCloseOtherTabs": "Close Other Tabs",
+  "msgResetName": "Reset Name",
+  "msgMoveLeft": "Move Left",
+  "msgMoveRight": "Move Right",
+  "msgTerminalPanesHidden": "{count} hidden",
+  "msgResizePanes": "Resize Panes"
 }

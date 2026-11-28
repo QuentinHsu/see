@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,15 +9,17 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/editor"
 )
 
-// The bottom panel: terminals, in tabs as VS Code has them, each tab
-// split into terminals side by side, where Xcode keeps its debug area.
-// They run with MyGo's terminal plugin, Ghostty's emulator.
+// The bottom panel: a tab for each terminal, its panes split right and
+// down as cards with their program, title and directory, as Rex draws
+// them. The terminals run with MyGo's terminal plugin, Ghostty's
+// emulator.
 
 type panelView uint8
 
@@ -42,23 +43,44 @@ type termPanel struct {
 	loading   bool  // the emulator's library is loading
 	loadErr   error // it could not
 	focus     *termPane
-	focused   bool // a terminal had the keyboard in the last frame
+	focusReq  *termPane // a terminal to focus once its view is built
+	focused   bool      // a terminal had the keyboard in the last frame
+	wasMax    bool      // the layout the last frame drew
+	renaming  *termTab
+	rename    string
+	renameOff bool // whether the field had the keyboard
 }
 
-// termTab is a tab of the panel: terminals side by side.
+// termTab is a tab of the panel: one terminal, or a tree of them split
+// right and down, as Rex arranges panes.
 type termTab struct {
 	id     int
-	panes  []*termPane
+	name   string // the user's name for it; empty follows the focused pane
+	root   *termNode
 	active *termPane
+	zoom   *termPane // the pane the tab shows alone, or nil
+}
+
+// termNode is a pane, or two nodes split across: vertical when the first
+// is above the second. ratio is the first's share, as a percentage.
+type termNode struct {
+	id            int
+	pane          *termPane
+	first, second *termNode
+	vertical      bool
+	ratio         float32
 }
 
 // termPane is one terminal.
 type termPane struct {
-	id     int
-	term   *terminal.Terminal
-	title  string
-	handle ui.Handle
-	pct    float32 // its share of the room it splits with those after it
+	id        int
+	term      *terminal.Terminal
+	title     string
+	attention bool
+	lastText  string
+	lastSeen  time.Time // the last time its program printed
+	polled    time.Time
+	bounds    ui.Rect // where the last frame drew it, to focus by direction
 }
 
 // newTerm makes a terminal running the user's shell in dir, or in the
@@ -138,6 +160,7 @@ func (a *App) newTerm(p *termPane, dir string) error {
 		OnBell: func() {
 			a.post.Post(func() {
 				if a.gen == gen {
+					p.attention = true
 					a.notifyTerminal(p.title, "")
 				}
 			})
@@ -145,6 +168,7 @@ func (a *App) newTerm(p *termPane, dir string) error {
 		OnNotify: func(title, body string) {
 			a.post.Post(func() {
 				if a.gen == gen {
+					p.attention = true
 					a.notifyTerminal(title, body)
 				}
 			})
@@ -209,6 +233,10 @@ func (a *App) toggleTerminal() {
 		a.newTerminalTab()
 	} else if tp.active != nil {
 		tp.focus = tp.active.active
+		if tp.active.zoom != nil {
+			tp.focus = tp.active.zoom
+		}
+		tp.focusReq = tp.focus
 	}
 }
 
@@ -225,61 +253,86 @@ func (a *App) newTerminalTabAt(dir string) {
 	a.focusEditor = nil
 	a.withTerminal(func() {
 		tp := &a.term
-		tp.nextID++
-		p := &termPane{id: tp.nextID, title: a.shellTitle()}
-		if err := a.newTerm(p, dir); err != nil {
-			a.fail(locales.MsgCouldNotStartATerminal() + err.Error())
+		p, ok := a.spawnTermPane(dir, a.shellTitle())
+		if !ok {
 			return
 		}
-		tab := &termTab{id: tp.nextID, panes: []*termPane{p}, active: p}
+		tp.nextID++
+		tab := &termTab{id: tp.nextID, root: &termNode{id: p.id, pane: p}, active: p}
 		tp.tabs = append(tp.tabs, tab)
-		tp.active, tp.focus = tab, p
+		tp.active, tp.focus, tp.focusReq = tab, p, p
 	})
 }
 
-// splitTerminal adds a terminal beside the active one of the tab.
-func (a *App) splitTerminal() {
+// spawnTermPane starts a terminal in dir, with termPane's title until
+// its shell names it, and reports whether it started.
+func (a *App) spawnTermPane(dir, title string) (*termPane, bool) {
+	tp := &a.term
+	tp.nextID++
+	p := &termPane{id: tp.nextID, title: title}
+	if err := a.newTerm(p, dir); err != nil {
+		a.fail(locales.MsgCouldNotStartATerminal() + err.Error())
+		return nil, false
+	}
+	return p, true
+}
+
+// splitTerminal splits the active pane across: vertical puts the new
+// terminal below it, as Rex's split down; otherwise beside it.
+func (a *App) splitTerminal(vertical bool) {
 	tp := &a.term
 	tab := tp.active
 	if tab == nil {
 		a.newTerminalTab()
 		return
 	}
+	anchor := tab.active
+	if tab.zoom != nil {
+		anchor, tab.zoom = tab.zoom, nil
+	}
+	if anchor == nil {
+		return
+	}
 	a.withTerminal(func() {
-		tp.nextID++
-		p := &termPane{id: tp.nextID, title: a.shellTitle()}
-		if err := a.newTerm(p, a.paneDir(tab.active)); err != nil {
-			a.fail(locales.MsgCouldNotStartATerminal() + err.Error())
+		tp := &a.term
+		p, ok := a.spawnTermPane(a.paneDir(anchor), a.shellTitle())
+		if !ok {
 			return
 		}
-		at := slices.Index(tab.panes, tab.active) + 1
-		tab.panes = slices.Insert(tab.panes, at, p)
-		// Split the room evenly.
-		for i, q := range tab.panes {
-			q.pct = 100 / float32(len(tab.panes)-i)
+		tp.nextID++
+		if !tab.root.split(anchor, p, vertical, tp.nextID) {
+			if p.term != nil {
+				p.term.Close()
+			}
+			return
 		}
-		tab.active, tp.focus = p, p
-		tp.open = true
+		tab.active, tp.focus, tp.focusReq = p, p, p
+		tp.open, tp.view = true, panelTerminal
 	})
 }
 
-// closePane closes a terminal: its tab goes with its last terminal, and
-// the panel with its last tab.
+// closePane closes a terminal: its split goes with it, its tab with its
+// last terminal, and the panel with its last tab.
 func (a *App) closePane(p *termPane) {
 	tp := &a.term
 	for ti, tab := range tp.tabs {
-		i := slices.Index(tab.panes, p)
+		order := tab.panes()
+		i := slices.Index(order, p)
 		if i < 0 {
 			continue
 		}
 		if p.term != nil {
 			p.term.Close()
 		}
-		tab.panes = slices.Delete(tab.panes, i, i+1)
-		for j, q := range tab.panes {
-			q.pct = 100 / float32(len(tab.panes)-j)
+		if tab.zoom == p {
+			tab.zoom = nil
 		}
-		if len(tab.panes) == 0 {
+		if tab.root != nil {
+			tab.root, _ = tab.root.remove(p)
+		}
+		left := tab.panes()
+		switch {
+		case len(left) == 0:
 			tp.tabs = slices.Delete(tp.tabs, ti, ti+1)
 			if tp.active == tab {
 				tp.active = nil
@@ -287,46 +340,191 @@ func (a *App) closePane(p *termPane) {
 					tp.active = tp.tabs[min(ti, n-1)]
 				}
 			}
-		} else if tab.active == p {
-			tab.active = tab.panes[min(i, len(tab.panes)-1)]
+		case tab.active == p:
+			tab.active = left[min(i, len(left)-1)]
 		}
 		if tp.focus == p {
 			tp.focus = nil
 			if tp.active != nil {
 				tp.focus = tp.active.active
+				if tp.active.zoom != nil {
+					tp.focus = tp.active.zoom
+				}
+				tp.focusReq = tp.focus
 			} else if a.focus != nil {
 				a.focusEditor = a.focus.eds[a.focus.active]
 			}
 		}
 		if len(tp.tabs) == 0 {
 			tp.open, tp.maximized = false, false
+			tp.renaming = nil
 		}
 		return
 	}
 }
 
+// termTabIndex is where tab sits in the panel, or -1.
+func (a *App) termTabIndex(tab *termTab) int {
+	return slices.Index(a.term.tabs, tab)
+}
+
+// selectTermTab shows tab, and its focused pane.
+func (a *App) selectTermTab(tab *termTab) {
+	if tab == nil {
+		return
+	}
+	tp := &a.term
+	tp.active, tp.view = tab, panelTerminal
+	if tab.zoom != nil {
+		tp.focus = tab.zoom
+	} else {
+		tp.focus = tab.active
+	}
+	tp.focusReq = tp.focus
+}
+
+// cycleTermTab moves through the panel's tabs, dir steps around.
+func (a *App) cycleTermTab(dir int) {
+	tp := &a.term
+	n := len(tp.tabs)
+	if n < 2 {
+		return
+	}
+	i := max(a.termTabIndex(tp.active), 0)
+	a.selectTermTab(tp.tabs[(i+dir+n)%n])
+}
+
+// activateTermTabNumber shows the n-th terminal tab, counting from one.
+func (a *App) activateTermTabNumber(n int) {
+	tp := &a.term
+	if n < 1 || n > len(tp.tabs) {
+		return
+	}
+	a.selectTermTab(tp.tabs[n-1])
+}
+
+// moveTermTab moves tab to index to, as dragging it across the strip.
+func (a *App) moveTermTab(tab *termTab, to int) {
+	tp := &a.term
+	from := a.termTabIndex(tab)
+	if from < 0 {
+		return
+	}
+	tp.tabs = slices.Delete(tp.tabs, from, from+1)
+	tp.tabs = slices.Insert(tp.tabs, min(to, len(tp.tabs)), tab)
+}
+
+// closeTermTab closes a tab and every terminal in it.
+func (a *App) closeTermTab(tab *termTab) {
+	for _, p := range tab.panes() {
+		if p.term != nil {
+			p.term.Close()
+		}
+	}
+	tp := &a.term
+	i := a.termTabIndex(tab)
+	if i < 0 {
+		return
+	}
+	tp.tabs = slices.Delete(tp.tabs, i, i+1)
+	if tp.renaming == tab {
+		tp.renaming = nil
+	}
+	if tp.active == tab {
+		tp.active = nil
+		if n := len(tp.tabs); n > 0 {
+			tp.active = tp.tabs[min(i, n-1)]
+			tp.focus = tp.active.active
+			if tp.active.zoom != nil {
+				tp.focus = tp.active.zoom
+			}
+		}
+	}
+	if len(tp.tabs) == 0 {
+		tp.open, tp.maximized = false, false
+		tp.focus = nil
+		if a.focus != nil {
+			a.focusEditor = a.focus.eds[a.focus.active]
+		}
+	}
+}
+
+// closeOtherTermTabs closes every tab but tab.
+func (a *App) closeOtherTermTabs(tab *termTab) {
+	for _, other := range slices.Clone(a.term.tabs) {
+		if other != tab {
+			a.closeTermTab(other)
+		}
+	}
+}
+
+// toggleTermZoom shows the focused pane alone, or the tab again.
+func (a *App) toggleTermZoom() {
+	tab := a.term.active
+	if tab == nil {
+		return
+	}
+	if tab.zoom != nil {
+		tab.zoom = nil
+	} else {
+		tab.zoom = tab.active
+	}
+	if tab.zoom != nil {
+		a.term.focusReq = tab.zoom
+	} else {
+		a.term.focusReq = tab.active
+	}
+}
+
+// startTermRename edits a tab's name in place.
+func (a *App) startTermRename(tab *termTab) {
+	tp := &a.term
+	tp.renaming, tp.rename = tab, tab.name
+	tp.renameOff = false
+}
+
+// finishTermRename keeps or drops the name being edited.
+func (a *App) finishTermRename(keep bool) {
+	tp := &a.term
+	if keep && tp.renaming != nil {
+		name := strings.TrimSpace(tp.rename)
+		if tp.renaming.name != name {
+			tp.renaming.name = name
+			a.saveConfigSoon()
+		}
+	}
+	tp.renaming = nil
+}
+
 // termSession is what of the panel a session keeps: each tab's shells,
-// their directories and titles, which tab was active, and whether the
-// panel showed terminals at all.
+// their directories, titles and splits, which tab was active, and
+// whether the panel showed terminals at all.
 func (a *App) termSession() (tabs []config.TermTab, active int, open bool) {
 	tp := &a.term
 	if tp.view != panelTerminal {
 		return nil, 0, false
 	}
 	for _, tab := range tp.tabs {
-		saved := config.TermTab{}
-		for j, p := range tab.panes {
+		panes := tab.panes()
+		if len(panes) == 0 {
+			continue
+		}
+		index := make(map[*termPane]int, len(panes))
+		saved := config.TermTab{Name: tab.name}
+		for i, p := range panes {
+			index[p] = i
 			sp := config.TermPane{Title: p.title}
 			if p.term != nil {
 				sp.Dir = p.term.Dir()
 			}
-			if tab.active == p {
-				saved.Active = j
-			}
 			saved.Panes = append(saved.Panes, sp)
 		}
-		if len(saved.Panes) == 0 {
-			continue
+		saved.Root = saveTermLayout(tab.root, index)
+		if i, ok := index[tab.active]; ok {
+			saved.Active = i
+		}
+		if i, ok := index[tab.zoom]; ok {
+			saved.Zoom = i + 1
 		}
 		if tp.active == tab {
 			active = len(tabs)
@@ -339,9 +537,33 @@ func (a *App) termSession() (tabs []config.TermTab, active int, open bool) {
 	return tabs, active, tp.open
 }
 
+// saveTermLayout writes a split tree, its panes as indices in the tab's
+// saved panes.
+func saveTermLayout(n *termNode, index map[*termPane]int) *config.TermLayout {
+	if n == nil {
+		return nil
+	}
+	if n.pane != nil {
+		i, ok := index[n.pane]
+		if !ok {
+			return nil
+		}
+		return &config.TermLayout{Leaf: true, Pane: i}
+	}
+	first := saveTermLayout(n.first, index)
+	second := saveTermLayout(n.second, index)
+	switch {
+	case first == nil:
+		return second
+	case second == nil:
+		return first
+	}
+	return &config.TermLayout{Vertical: n.vertical, Ratio: n.ratio, First: first, Second: second}
+}
+
 // openRestoredTerminals recreates the panel's tabs of the last session:
-// a fresh shell at each one's directory, with its title. The first
-// failure ends the restore; terminals opened before it stay.
+// a fresh shell at each one's directory, with its title, and its splits.
+// The first failure ends the restore; terminals opened before it stay.
 func (a *App) openRestoredTerminals(s config.Workspace) {
 	if len(s.Terminals) == 0 || a.root == "" {
 		return
@@ -355,28 +577,39 @@ func (a *App) openRestoredTerminals(s config.Workspace) {
 		}
 		for i, saved := range s.Terminals {
 			tp.nextID++
-			tab := &termTab{id: tp.nextID}
+			tab := &termTab{id: tp.nextID, name: saved.Name}
+			panes := make([]*termPane, len(saved.Panes))
+			failed := false
 			for j, sp := range saved.Panes {
 				tp.nextID++
 				p := &termPane{id: tp.nextID, title: sp.Title}
 				if err := a.newTerm(p, sp.Dir); err != nil {
 					a.logf("session: restoring terminal: %v", err)
-					tp.open = s.PanelOpen && len(tp.tabs) > 0
-					return
+					failed = true
+					break
 				}
-				tab.panes = append(tab.panes, p)
-				if j == saved.Active {
-					tab.active = p
-				}
+				panes[j] = p
 			}
-			if len(tab.panes) == 0 {
+			if failed {
+				for _, p := range panes {
+					if p != nil && p.term != nil {
+						p.term.Close()
+					}
+				}
+				tp.open = s.PanelOpen && len(tp.tabs) > 0
+				return
+			}
+			if len(panes) == 0 {
 				continue
 			}
-			if tab.active == nil {
-				tab.active = tab.panes[0]
+			tab.root = restoreTermLayout(saved.Root, panes)
+			if tab.root == nil {
+				tab.root = legacyTermTree(panes)
 			}
-			for j, p := range tab.panes {
-				p.pct = 100 / float32(len(tab.panes)-j)
+			order := tab.panes()
+			tab.active = order[min(max(saved.Active, 0), len(order)-1)]
+			if saved.Zoom > 0 && saved.Zoom <= len(order) {
+				tab.zoom = order[saved.Zoom-1]
 			}
 			tp.tabs = append(tp.tabs, tab)
 			if i == s.ActiveTerminal {
@@ -386,16 +619,63 @@ func (a *App) openRestoredTerminals(s config.Workspace) {
 		if tp.active == nil && len(tp.tabs) > 0 {
 			tp.active = tp.tabs[0]
 		}
+		if tp.active != nil {
+			tp.focus = tp.active.active
+			if tp.active.zoom != nil {
+				tp.focus = tp.active.zoom
+			}
+		}
 		if len(tp.tabs) == 0 {
 			tp.open = false
 		}
 	})
 }
 
+// restoreTermLayout rebuilds a saved split tree over its panes.
+func restoreTermLayout(l *config.TermLayout, panes []*termPane) *termNode {
+	if l == nil {
+		return nil
+	}
+	if l.Leaf || (l.First == nil && l.Second == nil) {
+		if l.Pane < 0 || l.Pane >= len(panes) {
+			return nil
+		}
+		return &termNode{id: panes[l.Pane].id, pane: panes[l.Pane]}
+	}
+	first := restoreTermLayout(l.First, panes)
+	second := restoreTermLayout(l.Second, panes)
+	switch {
+	case first == nil:
+		return second
+	case second == nil:
+		return first
+	}
+	ratio := l.Ratio
+	if ratio <= 0 || ratio >= 100 {
+		ratio = 50
+	}
+	return &termNode{id: first.id, first: first, second: second, vertical: l.Vertical, ratio: ratio}
+}
+
+// legacyTermTree lays panes saved before splits were a tree side by side.
+func legacyTermTree(panes []*termPane) *termNode {
+	last := len(panes) - 1
+	n := &termNode{id: panes[last].id, pane: panes[last]}
+	for i := last - 1; i >= 0; i-- {
+		n = &termNode{
+			id:     panes[i].id,
+			first:  &termNode{id: panes[i].id, pane: panes[i]},
+			second: n,
+			ratio:  100 / float32(last-i+1),
+		}
+	}
+	return n
+}
+
 // closeTerminals ends every terminal, as the workspace closes.
 func (a *App) closeTerminals() {
 	for _, tab := range a.term.tabs {
-		for _, p := range tab.panes {
+		for _, p := range tab.panes() {
 			if p.term != nil {
 				p.term.Close()
 			}
@@ -497,6 +777,17 @@ func (a *App) editorsAndPanel(c *ui.Context, editors func()) {
 	if tp.pct <= 0 {
 		tp.pct = float32(a.cfg.EditorPanelPct())
 	}
+	// A layout change, as maximizing the panel, rebuilds the panes and
+	// takes the keyboard from the terminal: ask for it back.
+	if tp.wasMax != tp.maximized {
+		tp.wasMax = tp.maximized
+		if tp.view == panelTerminal && tp.active != nil {
+			tp.focusReq = tp.active.active
+			if tp.active.zoom != nil {
+				tp.focusReq = tp.active.zoom
+			}
+		}
+	}
 	switch {
 	case !tp.open:
 		editors()
@@ -512,9 +803,13 @@ func (a *App) editorsAndPanel(c *ui.Context, editors func()) {
 
 func (a *App) terminalPanel(c *ui.Context) {
 	tp := &a.term
-	panel := ui.Row(c).Fill().AlignItems(ui.Stretch).Background(colors(c).Editor).BorderWidth(1, 0, 0, 0).BorderColor(colors(c).Hairline)
+	panel := ui.Column(c).Fill().Background(colors(c).Editor).BorderWidth(1, 0, 0, 0).BorderColor(colors(c).Hairline)
 	panel.Children(func() {
-		ui.Column(c).Grow(1).FillHeight().Children(func() {
+		a.termViewBar(c)
+		if tp.view == panelTerminal {
+			a.termTabsBar(c)
+		}
+		ui.Column(c).Grow(1).FillWidth().Children(func() {
 			switch {
 			case tp.view == panelTasks:
 				a.taskView(c)
@@ -531,178 +826,12 @@ func (a *App) terminalPanel(c *ui.Context) {
 					ui.Spinner(c)
 					ui.Text(c, locales.MsgLoadingTheTerminal()).TextColor(colors(c).Muted)
 				})
-			case tp.active != nil:
-				a.paneSplit(c, tp.active, tp.active.panes)
+			default:
+				a.termPanes(c)
 			}
 		})
-		a.termTabList(c)
 	})
 	tp.focused = tp.view == panelTerminal && panel.FocusWithin()
-}
-
-// paneSplit shows panes side by side, each taking its share of the room
-// it splits with those after it.
-func (a *App) paneSplit(c *ui.Context, tab *termTab, panes []*termPane) {
-	if len(panes) == 1 {
-		a.termPaneView(c, tab, panes[0])
-		return
-	}
-	p := panes[0]
-	ui.SplitPercent(c.Key(p), &p.pct, func() { a.termPaneView(c, tab, p) }, func() { a.paneSplit(c, tab, panes[1:]) }).Grow(1).FillHeight()
-}
-
-func (a *App) termPaneView(c *ui.Context, tab *termTab, p *termPane) {
-	tp := &a.term
-	box := ui.Column(c.Key(p)).Grow(1).Fill()
-	if len(tab.panes) > 1 && tab.active == p {
-		box.DrawOver(func(pt *ui.Painter, r ui.Rect) {
-			pt.Fill(ui.Rect{X: r.X, Y: r.Y, W: r.W, H: 1}, c.Theme().Accent, 0)
-		})
-	}
-	box.Children(func() {
-		v := terminal.View(c, p.term).Grow(1).Fill().Label(locales.MsgTerminal()+p.title).FocusBind(&tp.focus, p)
-		if v.FocusWithin() {
-			tab.active = p
-		}
-	})
-}
-
-// termTabList is the panel's tabs, down its right side as VS Code lists
-// its terminals, under a row of small buttons.
-func (a *App) termTabList(c *ui.Context) {
-	tp := &a.term
-	ui.Column(c).Width(168).Shrink(0).FillHeight().Background(colors(c).TabBar).BorderWidth(0, 0, 0, 1).BorderColor(colors(c).Hairline).Children(func() {
-		ui.Row(c).FillWidth().Height(26).Padding(0, 4).Gap(0).AlignItems(ui.Center).Children(func() {
-			small := func(icon *ui.SVG, label, tip string) bool {
-				return iconButton(c, icon, label, tip, false).Padding(3).Clicked()
-			}
-			if small(icPlus, commandLabel("terminal.new"), commandLabel("terminal.new")+" ("+keyLabel("Ctrl+Shift+", "`")+")") {
-				a.newTerminalTab()
-			}
-			if small(icSplitH, locales.MsgSplitTerminal(), locales.MsgSplitTerminal()+" ("+keyLabel("Cmd+", "D")+")") {
-				a.splitTerminal()
-			}
-			if tab := tp.active; tab != nil && small(icTrash, locales.MsgKillTerminal(), locales.MsgKillTheTerminal()) {
-				a.closePane(tab.active)
-			}
-			ui.Box(c).Grow(1)
-			maxIcon, maxTip := icMaximize, locales.MsgMaximizeThePanel()
-			if tp.maximized {
-				maxIcon, maxTip = icRestore, locales.MsgRestoreThePanel()
-			}
-			compact := func(icon *ui.SVG, label, tip string) bool {
-				b := ui.ButtonBase(c).Label(label).Tooltip(tip).Size(22, 22).Radius(6).Shrink(0).KeepFocus().Center()
-				if b.Hovered() || b.Pressed() {
-					b.Background(colors(c).Pill)
-				}
-				b.Children(func() { symbolIcon(c, icon, 12, colors(c).Muted) })
-				return b.Clicked()
-			}
-			if compact(maxIcon, maxTip, maxTip) {
-				tp.maximized = !tp.maximized
-			}
-			if compact(icClose, locales.MsgHideThePanel(), locales.MsgHideThePanel()+" ("+keyLabel("Cmd+Shift+", "Y")+")") {
-				tp.open, tp.maximized = false, false
-			}
-		})
-		ui.Scroll(c).Grow(1).FillWidth().Children(func() {
-			ui.Column(c).FillWidth().Padding(0, 4, 4, 4).Gap(1).Children(func() {
-				row := ui.Row(c.Key("output")).FillWidth().Height(24).Padding(0, 6).Gap(6).Radius(5).AlignItems(ui.Center)
-				if tp.view == panelOutput {
-					row.Background(colors(c).SelectedRow)
-				}
-				row.OnClick(func() { tp.view = panelOutput; tp.focus = nil })
-				row.Children(func() { symbolIcon(c, icLines, 16, colors(c).Muted); ui.Text(c, locales.MsgOutput()).FontSize(12) })
-				taskRow := ui.Row(c.Key("tasks")).FillWidth().Height(24).Padding(0, 6).Radius(5).AlignItems(ui.Center)
-				if tp.view == panelTasks {
-					taskRow.Background(colors(c).SelectedRow)
-				}
-				taskRow.OnClick(a.showTasks)
-				taskRow.Children(func() { ui.Text(c, taskMessage("tasksTitle")).FontSize(12) })
-				refsRow := ui.Row(c.Key("references")).FillWidth().Height(24).Padding(0, 6).Gap(6).Radius(5).AlignItems(ui.Center)
-				if tp.view == panelReferences {
-					refsRow.Background(colors(c).SelectedRow)
-				}
-				refsRow.OnClick(func() { tp.view = panelReferences; tp.focus = nil })
-				refsRow.Children(func() {
-					symbolIcon(c, icPin, 16, colors(c).Muted)
-					ui.Text(c, locales.MsgReferences()).FontSize(12)
-				})
-				callsRow := ui.Row(c.Key("calls")).FillWidth().Height(24).Padding(0, 6).Gap(6).Radius(5).AlignItems(ui.Center)
-				if tp.view == panelCalls {
-					callsRow.Background(colors(c).SelectedRow)
-				}
-				callsRow.OnClick(func() { tp.view = panelCalls; tp.focus = nil })
-				callsRow.Children(func() {
-					symbolIcon(c, icRelated, 16, colors(c).Muted)
-					ui.Text(c, a.hierarchyText("")).FontSize(12)
-				})
-				for i, tab := range tp.tabs {
-					a.termTabRow(c, i, tab)
-				}
-			})
-		})
-	})
-}
-
-// termTabRow shows each split as a selectable row in its terminal group.
-func (a *App) termTabRow(c *ui.Context, i int, tab *termTab) {
-	for j, p := range tab.panes {
-		a.termPaneRow(c, i, j, tab, p, len(tab.panes) > 1)
-	}
-}
-
-func (a *App) termPaneRow(c *ui.Context, i, j int, tab *termTab, p *termPane, nested bool) {
-	tp := &a.term
-	active := tp.active == tab && tab.active == p && tp.view == panelTerminal
-	row := ui.Row(c.Key(p)).Label(fmt.Sprintf(locales.MsgTerminalDD(), i+1, j+1)).FillWidth().Height(24).Padding(0, 4, 0, 6).Gap(6).Radius(5).AlignItems(ui.Center)
-	hovered := row.Hovered()
-	switch {
-	case active:
-		row.Background(colors(c).SelectedRow)
-	case hovered:
-		row.Background(colors(c).Pill)
-	}
-	row.OnClick(func() {
-		tp.active = tab
-		tab.active = p
-		tp.view = panelTerminal
-		tp.focus = p
-	})
-	row.Children(func() {
-		if nested {
-			branch := "├"
-			if j == 0 {
-				branch = "┌"
-			} else if j == len(tab.panes)-1 {
-				branch = "└"
-			}
-			ui.Text(c, branch).FontSize(16).TextColor(colors(c).Muted)
-		}
-		symbolIcon(c, icPrompt, 16, colors(c).Muted)
-		title := p.title
-		if title == "" {
-			title = a.shellTitle()
-		}
-		t := ui.Text(c, title).FontSize(12).SingleLine().Ellipsis("…").MinWidth(0).Grow(1).Shrink(1)
-		if !active {
-			t.TextColor(colors(c).Muted)
-		}
-		if hovered {
-			split := ui.ButtonBase(c).Label(fmt.Sprintf(locales.MsgSplitTerminalDD(), i+1, j+1)).Tooltip(fmt.Sprintf(locales.MsgSplitTerminalDD(), i+1, j+1)).Size(20, 20).Radius(3).Center().KeepFocus()
-			split.Children(func() { symbolIcon(c, icSplitH, 16, colors(c).Muted) })
-			split.OnClick(func() {
-				tp.active, tab.active = tab, p
-				tp.view = panelTerminal
-				a.splitTerminal()
-			})
-		}
-		cl := ui.ButtonBase(c).Label(fmt.Sprintf(locales.MsgCloseTerminalDD(), i+1, j+1)).Tooltip(fmt.Sprintf(locales.MsgCloseTerminalDD(), i+1, j+1)).Size(20, 20).Radius(3).Center().KeepFocus()
-		if hovered {
-			cl.Children(func() { symbolIcon(c, icTrash, 16, colors(c).Muted) })
-		}
-		cl.OnClick(func() { a.closePane(p) })
-	})
 }
 
 var (
@@ -740,7 +869,7 @@ func (a *App) applyTerminalPrefs() {
 		cos = terminal.CopyOnSelectClipboard
 	}
 	for _, tab := range a.term.tabs {
-		for _, p := range tab.panes {
+		for _, p := range tab.panes() {
 			if p.term != nil {
 				p.term.SetFont(a.terminalFont())
 				p.term.SetCopyOnSelect(cos)

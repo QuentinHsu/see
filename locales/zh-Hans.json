@@ -1247,5 +1247,22 @@
   "msgServerCrashedRepeatedly": "反复崩溃 — 点“重试”重新启动",
   "errorBannerMore": "{count, plural, other {（还有 # 个）}}",
   "review": "查看",
-  "msgConfigLoadProblem": "部分设置无法加载，已重置为默认值：{detail}"
+  "msgConfigLoadProblem": "部分设置无法加载，已重置为默认值：{detail}",
+  "commandSplitTerminalRight": "向右拆分终端",
+  "commandSplitTerminalDown": "向下拆分终端",
+  "commandZoomTerminalPane": "最大化终端窗格",
+  "commandUnzoomTerminalPane": "显示全部窗格",
+  "commandCloseTerminalPane": "关闭终端窗格",
+  "commandCloseTerminalTab": "关闭终端标签页",
+  "commandNextTerminalTab": "下一个终端标签页",
+  "commandPreviousTerminalTab": "上一个终端标签页",
+  "commandRenameTerminalTab": "重命名终端标签页",
+  "commandClearTerminal": "清空终端",
+  "msgCloseTab": "关闭标签页",
+  "msgCloseOtherTabs": "关闭其他标签页",
+  "msgResetName": "重置名称",
+  "msgMoveLeft": "向左移动",
+  "msgMoveRight": "向右移动",
+  "msgTerminalPanesHidden": "已隐藏 {count} 个窗格",
+  "msgResizePanes": "调整窗格大小"
 }

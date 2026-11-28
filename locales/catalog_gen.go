@@ -12669,3 +12669,175 @@ func MsgConfigLoadProblem(detail string) string {
 func (msgs Messages) MsgConfigLoadProblem(detail string) string {
 	return Catalog.Format(msgs.locale, "msgConfigLoadProblem", map[string]any{"detail": detail})
 }
+
+// CommandSplitTerminalRight says "Split Terminal Right"
+// in the language the app shows.
+func CommandSplitTerminalRight() string { return In(i18n.Locale()).CommandSplitTerminalRight() }
+
+// CommandSplitTerminalRight says "Split Terminal Right"
+// in the language of msgs.
+func (msgs Messages) CommandSplitTerminalRight() string {
+	return Catalog.Format(msgs.locale, "commandSplitTerminalRight", nil)
+}
+
+// CommandSplitTerminalDown says "Split Terminal Down"
+// in the language the app shows.
+func CommandSplitTerminalDown() string { return In(i18n.Locale()).CommandSplitTerminalDown() }
+
+// CommandSplitTerminalDown says "Split Terminal Down"
+// in the language of msgs.
+func (msgs Messages) CommandSplitTerminalDown() string {
+	return Catalog.Format(msgs.locale, "commandSplitTerminalDown", nil)
+}
+
+// CommandZoomTerminalPane says "Zoom Terminal Pane"
+// in the language the app shows.
+func CommandZoomTerminalPane() string { return In(i18n.Locale()).CommandZoomTerminalPane() }
+
+// CommandZoomTerminalPane says "Zoom Terminal Pane"
+// in the language of msgs.
+func (msgs Messages) CommandZoomTerminalPane() string {
+	return Catalog.Format(msgs.locale, "commandZoomTerminalPane", nil)
+}
+
+// CommandUnzoomTerminalPane says "Show All Panes"
+// in the language the app shows.
+func CommandUnzoomTerminalPane() string { return In(i18n.Locale()).CommandUnzoomTerminalPane() }
+
+// CommandUnzoomTerminalPane says "Show All Panes"
+// in the language of msgs.
+func (msgs Messages) CommandUnzoomTerminalPane() string {
+	return Catalog.Format(msgs.locale, "commandUnzoomTerminalPane", nil)
+}
+
+// CommandCloseTerminalPane says "Close Terminal Pane"
+// in the language the app shows.
+func CommandCloseTerminalPane() string { return In(i18n.Locale()).CommandCloseTerminalPane() }
+
+// CommandCloseTerminalPane says "Close Terminal Pane"
+// in the language of msgs.
+func (msgs Messages) CommandCloseTerminalPane() string {
+	return Catalog.Format(msgs.locale, "commandCloseTerminalPane", nil)
+}
+
+// CommandCloseTerminalTab says "Close Terminal Tab"
+// in the language the app shows.
+func CommandCloseTerminalTab() string { return In(i18n.Locale()).CommandCloseTerminalTab() }
+
+// CommandCloseTerminalTab says "Close Terminal Tab"
+// in the language of msgs.
+func (msgs Messages) CommandCloseTerminalTab() string {
+	return Catalog.Format(msgs.locale, "commandCloseTerminalTab", nil)
+}
+
+// CommandNextTerminalTab says "Next Terminal Tab"
+// in the language the app shows.
+func CommandNextTerminalTab() string { return In(i18n.Locale()).CommandNextTerminalTab() }
+
+// CommandNextTerminalTab says "Next Terminal Tab"
+// in the language of msgs.
+func (msgs Messages) CommandNextTerminalTab() string {
+	return Catalog.Format(msgs.locale, "commandNextTerminalTab", nil)
+}
+
+// CommandPreviousTerminalTab says "Previous Terminal Tab"
+// in the language the app shows.
+func CommandPreviousTerminalTab() string { return In(i18n.Locale()).CommandPreviousTerminalTab() }
+
+// CommandPreviousTerminalTab says "Previous Terminal Tab"
+// in the language of msgs.
+func (msgs Messages) CommandPreviousTerminalTab() string {
+	return Catalog.Format(msgs.locale, "commandPreviousTerminalTab", nil)
+}
+
+// CommandRenameTerminalTab says "Rename Terminal Tab"
+// in the language the app shows.
+func CommandRenameTerminalTab() string { return In(i18n.Locale()).CommandRenameTerminalTab() }
+
+// CommandRenameTerminalTab says "Rename Terminal Tab"
+// in the language of msgs.
+func (msgs Messages) CommandRenameTerminalTab() string {
+	return Catalog.Format(msgs.locale, "commandRenameTerminalTab", nil)
+}
+
+// CommandClearTerminal says "Clear Terminal"
+// in the language the app shows.
+func CommandClearTerminal() string { return In(i18n.Locale()).CommandClearTerminal() }
+
+// CommandClearTerminal says "Clear Terminal"
+// in the language of msgs.
+func (msgs Messages) CommandClearTerminal() string {
+	return Catalog.Format(msgs.locale, "commandClearTerminal", nil)
+}
+
+// MsgCloseTab says "Close Tab"
+// in the language the app shows.
+func MsgCloseTab() string { return In(i18n.Locale()).MsgCloseTab() }
+
+// MsgCloseTab says "Close Tab"
+// in the language of msgs.
+func (msgs Messages) MsgCloseTab() string {
+	return Catalog.Format(msgs.locale, "msgCloseTab", nil)
+}
+
+// MsgCloseOtherTabs says "Close Other Tabs"
+// in the language the app shows.
+func MsgCloseOtherTabs() string { return In(i18n.Locale()).MsgCloseOtherTabs() }
+
+// MsgCloseOtherTabs says "Close Other Tabs"
+// in the language of msgs.
+func (msgs Messages) MsgCloseOtherTabs() string {
+	return Catalog.Format(msgs.locale, "msgCloseOtherTabs", nil)
+}
+
+// MsgResetName says "Reset Name"
+// in the language the app shows.
+func MsgResetName() string { return In(i18n.Locale()).MsgResetName() }
+
+// MsgResetName says "Reset Name"
+// in the language of msgs.
+func (msgs Messages) MsgResetName() string {
+	return Catalog.Format(msgs.locale, "msgResetName", nil)
+}
+
+// MsgMoveLeft says "Move Left"
+// in the language the app shows.
+func MsgMoveLeft() string { return In(i18n.Locale()).MsgMoveLeft() }
+
+// MsgMoveLeft says "Move Left"
+// in the language of msgs.
+func (msgs Messages) MsgMoveLeft() string {
+	return Catalog.Format(msgs.locale, "msgMoveLeft", nil)
+}
+
+// MsgMoveRight says "Move Right"
+// in the language the app shows.
+func MsgMoveRight() string { return In(i18n.Locale()).MsgMoveRight() }
+
+// MsgMoveRight says "Move Right"
+// in the language of msgs.
+func (msgs Messages) MsgMoveRight() string {
+	return Catalog.Format(msgs.locale, "msgMoveRight", nil)
+}
+
+// MsgTerminalPanesHidden says "{count} hidden"
+// in the language the app shows.
+func MsgTerminalPanesHidden(count string) string {
+	return In(i18n.Locale()).MsgTerminalPanesHidden(count)
+}
+
+// MsgTerminalPanesHidden says "{count} hidden"
+// in the language of msgs.
+func (msgs Messages) MsgTerminalPanesHidden(count string) string {
+	return Catalog.Format(msgs.locale, "msgTerminalPanesHidden", map[string]any{"count": count})
+}
+
+// MsgResizePanes says "Resize Panes"
+// in the language the app shows.
+func MsgResizePanes() string { return In(i18n.Locale()).MsgResizePanes() }
+
+// MsgResizePanes says "Resize Panes"
+// in the language of msgs.
+func (msgs Messages) MsgResizePanes() string {
+	return Catalog.Format(msgs.locale, "msgResizePanes", nil)
+}

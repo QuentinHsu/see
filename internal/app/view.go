@@ -211,12 +211,19 @@ func (a *App) shortcuts(c *ui.Context) {
 		a.toggleTerminal()
 	case c.Shortcut(ui.Cmd, ui.KeyBackslash):
 		if inTerm {
-			a.splitTerminal()
+			a.splitTerminal(false)
 		} else {
 			a.splitActive(sideRight)
 		}
 	case c.Shortcut(ui.Cmd|ui.Shift, ui.KeyBackslash):
-		a.splitActive(sideBottom)
+		if inTerm {
+			a.splitTerminal(true)
+		} else {
+			a.splitActive(sideBottom)
+		}
+	}
+	if inTerm && a.terminalShortcuts(c) {
+		return
 	}
 	for _, cmd := range commands() {
 		if cmd.shortcutKey == 0 || (inTerm && ((cmd.shortcutMods&ui.Ctrl != 0 && cmd.shortcutKey != ui.KeyBackquote) || cmd.shortcutKey == ui.KeyW)) {
@@ -224,7 +231,7 @@ func (a *App) shortcuts(c *ui.Context) {
 		}
 		if c.Shortcut(cmd.shortcutMods, cmd.shortcutKey) {
 			if inTerm && cmd.shortcutKey == ui.KeyD && cmd.shortcutMods == ui.Cmd {
-				a.splitTerminal()
+				a.splitTerminal(false)
 			} else {
 				cmd.run(a)
 			}
