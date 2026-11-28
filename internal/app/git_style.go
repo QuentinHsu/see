@@ -13,18 +13,20 @@ const (
 	gitSidebarTextOffset   = gitSidebarIconColumn + gitSidebarColumnGap
 	gitSidebarTextInset    = sidebarInset + gitSidebarTextOffset
 	gitSidebarTreeIndent   = 15
-	// gitChangesInset is where the changes sections' labels and their
-	// rows' arrow columns start.
+	// gitChangesInset is where a changes row's arrow column starts, and
+	// gitSectionInset where its section head's does, one tree level out
+	// from the section above.
 	gitChangesInset             = sidebarInset + gitSidebarTreeIndent + gitSidebarTextOffset
+	gitSectionInset             = sidebarInset + treeRowStep
 	gitSidebarRepositoryGap     = 8
-	gitSidebarMainHeaderHeight  = 24
-	gitSidebarGroupHeaderHeight = 22
-	gitSidebarRowHeight         = 24
+	gitSidebarMainHeaderHeight  = 28
+	gitSidebarGroupHeaderHeight = 26
+	gitSidebarRowHeight         = 26
 	gitSidebarTabsHeight        = 22
-	gitSidebarMainLabelSize     = 11
+	gitSidebarMainLabelSize     = 12
 	gitSidebarGroupLabelSize    = 11
-	gitSidebarRowLabelSize      = 11
-	gitSidebarBadgeFontSize     = 9
+	gitSidebarRowLabelSize      = 12
+	gitSidebarBadgeFontSize     = 10
 	gitSidebarComposerHeight    = 30
 	gitSidebarStashActionWidth  = 40
 	gitSidebarEmptyInset        = 6

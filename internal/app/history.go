@@ -144,7 +144,7 @@ func (a *App) gitChangesHeader(c *ui.Context) {
 	}
 	a.gitSectionHeader(c, locales.MsgChanges(), count, &a.git.changesClosed, func() {
 		a.branchDiffModePicker(c)
-		if a.git.changesClosed || a.git.branchDiffMode == compareBaseMode {
+		if a.git.branchDiffMode == compareBaseMode {
 			return
 		}
 		a.gitChangesViewButton(c)
@@ -174,9 +174,6 @@ func (a *App) gitChangesHeader(c *ui.Context) {
 func (a *App) gitHistoryHeader(c *ui.Context) {
 	h := &a.git.history
 	a.gitSectionHeader(c, locales.MsgHistory(), -1, &a.git.historyClosed, func() {
-		if a.git.historyClosed {
-			return
-		}
 		if h.loading {
 			ui.Spinner(c).FontSize(10)
 		}
@@ -210,35 +207,53 @@ func (a *App) gitSectionHeaderStyle(c *ui.Context, title string, count int, clos
 	if main {
 		height, inset = float32(gitSidebarMainHeaderHeight), float32(sidebarInset)
 	}
-	ui.Row(c.Key(title)).Shrink(0).FillWidth().Height(height).Padding(0, inset).Gap(2).AlignItems(ui.Center).Children(func() {
-		b := ui.ButtonBase(c).Label(title).Expanded(!*closed).Padding(0, 4, 0, 0).Radius(4).Gap(gitSidebarColumnGap).
-			AlignItems(ui.Center).MinWidth(0).Shrink(1).KeepFocus()
-		if b.Hovered() {
-			b.Background(colors(c).Pill)
+	a.gitDisclosureRow(c, title, title, count, closed, actions, height, inset, inset, main)
+}
+
+// gitDisclosureRow is a foldable section head: the whole width before its
+// actions toggles it, and the row, actions included, shows one hover, as
+// a source list's rows do.
+func (a *App) gitDisclosureRow(c *ui.Context, key, title string, count int, closed *bool, actions func(), height, start, end float32, main bool) {
+	ui.Row(c.Key(key)).Shrink(0).FillWidth().Height(height).PaddingStart(start).PaddingEnd(end).Children(func() {
+		row := ui.Row(c).FillWidth().Height(height).Gap(2).AlignItems(ui.Center).Radius(5)
+		if row.Hovered() {
+			row.Background(colors(c).Pill)
 		}
-		b.OnClick(func() {
-			*closed = !*closed
-			if closed == &a.git.historyClosed && !*closed {
-				a.syncHistory()
+		row.Children(func() {
+			// The title starts at the header's inset, as a tree row's does,
+			// and the button grows to the actions so the whole strip folds it.
+			b := ui.ButtonBase(c).Label(title).Expanded(!*closed).Height(height).Grow(1).MinWidth(0).
+				Padding(0, 4, 0, 0).Radius(5).Gap(gitSidebarColumnGap).AlignItems(ui.Center).Justify(ui.Start).KeepFocus()
+			if count >= 0 {
+				// The badge is drawn inside the button, whose label hides its
+				// text from assistive technology; the count is its description.
+				b.Description(fmt.Sprint(count))
 			}
-		})
-		turn := float32(90)
-		if *closed {
-			turn = 0
-		}
-		b.Children(func() {
-			ui.Box(c).Size(gitSidebarIconColumn, 12).Shrink(0).Center().Children(func() {
-				symbolIcon(c, icChevron, 9, colors(c).Dim).Rotate(turn)
+			b.OnClick(func() {
+				*closed = !*closed
+				if closed == &a.git.historyClosed && !*closed {
+					a.syncHistory()
+				}
 			})
-			if main {
-				gitSidebarMainLabel(c, title)
-			} else {
-				gitSidebarGroupLabel(c, title)
+			turn := float32(90)
+			if *closed {
+				turn = 0
 			}
-			gitSidebarCount(c, count)
+			b.Children(func() {
+				ui.Box(c).Size(gitSidebarIconColumn, 12).Shrink(0).Center().Children(func() {
+					symbolIcon(c, icChevron, 9, colors(c).Dim).Rotate(turn)
+				})
+				if main {
+					gitSidebarMainLabel(c, title)
+				} else {
+					gitSidebarGroupLabel(c, title)
+				}
+				gitSidebarCount(c, count)
+			})
+			if actions != nil {
+				actions()
+			}
 		})
-		ui.Box(c).Grow(1).MinWidth(0).Shrink(1)
-		actions()
 	})
 }
 

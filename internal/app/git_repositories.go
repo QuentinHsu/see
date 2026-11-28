@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -78,7 +79,7 @@ func (a *App) gitRepositories(c *ui.Context) {
 				ui.Text(c, locales.GitNoRepositoryFound()).FontSize(11).TextColor(colors(c).Muted).Padding(4, 8)
 				return
 			}
-			repoDisclosure(c.Key("root"), 0, filepath.Base(a.git.root), icGit, v.rootClosed,
+			repoDisclosure(c.Key("root"), 0, a.gitRepositoryLabel(a.git.root), icGit, v.rootClosed,
 				func() { v.rootClosed = !v.rootClosed }, nil)
 			if v.rootClosed {
 				return
@@ -95,6 +96,11 @@ func (a *App) gitRepositories(c *ui.Context) {
 								return git.Switch(ctx, root, git.Branch{Name: ref.Name}, nil)
 							})
 						}
+						m.Separator()
+						if m.Item(locales.GitDeleteBranchAction()).Disabled(current || a.git.busy).Chosen() {
+							a.confirmDelete(locales.GitDeleteBranchAction(), locales.GitDeleteBranchQuestion(ref.Name), locales.GitDeletedBranch(ref.Name),
+								func(ctx context.Context, root string) error { return git.DeleteBranch(ctx, root, ref.Name) })
+						}
 					})
 				}
 				if len(repo.Branches) == 0 {
@@ -110,7 +116,12 @@ func (a *App) gitRepositories(c *ui.Context) {
 				})
 			if !v.tagsClosed {
 				for _, ref := range repo.Tags {
-					a.repositoryRef(c, 2, ref, icGitTag, false, nil)
+					a.repositoryRef(c, 2, ref, icGitTag, false, func(m *ui.Menu) {
+						if m.Item(locales.GitDeleteTagAction()).Disabled(a.git.busy).Chosen() {
+							a.confirmDelete(locales.GitDeleteTagAction(), locales.GitDeleteTagQuestion(ref.Name), locales.GitDeletedTag(ref.Name),
+								func(ctx context.Context, root string) error { return git.DeleteTag(ctx, root, ref.Name) })
+						}
+					})
 				}
 				if len(repo.Tags) == 0 {
 					repoEmpty(c.Key("no-tags"), 2, locales.GitNoTags())
@@ -129,7 +140,15 @@ func (a *App) gitRepositories(c *ui.Context) {
 					}, nil)
 					if !closed {
 						for _, ref := range remote.Branches {
-							a.repositoryRef(c, 3, ref, icBranches, false, nil)
+							a.repositoryRef(c, 3, ref, icBranches, false, func(m *ui.Menu) {
+								if m.Item(locales.GitDeleteRemoteBranchAction()).Disabled(a.git.busy).Chosen() {
+									remoteName, branch := remote.Name, ref.Name
+									a.confirmDelete(locales.GitDeleteRemoteBranchAction(), locales.GitDeleteRemoteBranchQuestion(branch, remoteName), locales.GitDeletedRemoteBranch(branch, remoteName),
+										func(ctx context.Context, root string) error {
+											return git.DeleteRemoteBranch(ctx, root, remoteName, branch)
+										})
+								}
+							})
 						}
 						if len(remote.Branches) == 0 {
 							repoEmpty(c.Key("empty:"+remote.Name), 3, locales.GitNoRemoteBranches())
@@ -145,12 +164,9 @@ func (a *App) gitRepositories(c *ui.Context) {
 }
 
 func (a *App) gitRepositoryChoice(c *ui.Context, root string) {
-	label := filepath.Base(root)
-	if rel, err := filepath.Rel(a.root, root); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		label = rel
-	}
+	label := a.gitRepositoryLabel(root)
 	selected := root == a.git.root
-	row := ui.ButtonBase(c.Key("repository:"+root)).FillWidth().Height(24).Shrink(0).AlignItems(ui.Center).
+	row := ui.ButtonBase(c.Key("repository:"+root)).FillWidth().Height(gitSidebarRowHeight).Shrink(0).AlignItems(ui.Center).
 		Label(label).Tooltip(root).Gap(5).Radius(5).Padding(0, 6).KeepFocus().OnClick(func() { a.selectGitRepository(root) })
 	if selected {
 		row.Background(c.Theme().Accent.Alpha(0.12))
@@ -164,6 +180,41 @@ func (a *App) gitRepositoryChoice(c *ui.Context, root string) {
 			symbolIcon(c, icGitCurrent, 13, c.Theme().Accent)
 		}
 	})
+}
+
+// gitRepositoryLabel is how a repository is named in the sidebar: its
+// path from the workspace, or its base name when it lies outside it.
+func (a *App) gitRepositoryLabel(root string) string {
+	label := filepath.Base(root)
+	if rel, err := filepath.Rel(a.realRoot, root); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		label = filepath.ToSlash(rel)
+	}
+	return label
+}
+
+// confirmDelete asks before deleting a Git ref, then deletes it in the
+// repository the question was asked about.
+func (a *App) confirmDelete(label, message, done string, remove func(context.Context, string) error) {
+	if a.git.busy || a.git.root == "" || a.deleteConfirm != nil || a.wsCtx == nil {
+		return
+	}
+	ctx, root := a.wsCtx, a.git.root
+	q := &confirmation{message: message}
+	q.actions = []action{
+		{label, func() {
+			if a.deleteConfirm != q || a.git.busy {
+				return
+			}
+			a.deleteConfirm = nil
+			a.runBranchJob(done, func() error { return remove(ctx, root) })
+		}},
+		{locales.Cancel(), func() {
+			if a.deleteConfirm == q {
+				a.deleteConfirm = nil
+			}
+		}},
+	}
+	a.deleteConfirm = q
 }
 
 func (a *App) selectGitRepository(root string) {
@@ -204,6 +255,7 @@ func (a *App) selectGitRepository(root string) {
 	a.git.selected, a.git.decor = nil, nil
 	a.git.selectionAnchor = ""
 	a.git.err, a.git.web, a.git.upstream = "", "", ""
+	a.git.conflictedClosed, a.git.stagedClosed, a.git.unstagedClosed = false, false, false
 	a.git.ahead, a.git.behind, a.git.notifiedBehind = 0, 0, 0
 	a.git.merging, a.git.fetchNotified = false, false
 	a.git.branchFingerprint = ""
@@ -252,7 +304,7 @@ func repoDisclosure(c *ui.Context, depth float32, title string, icon *ui.SVG, cl
 }
 
 func repoEmpty(c *ui.Context, depth float32, label string) {
-	ui.Text(c, label).Height(22).FontSize(11).TextColor(colors(c).Muted).Padding(2, 4, 0, 17+depth*12).SingleLine()
+	ui.Text(c, label).Height(gitSidebarRowHeight).FontSize(12).TextColor(colors(c).Muted).Padding(2, 4, 0, 17+depth*12).SingleLine()
 }
 
 func (a *App) repositoryRef(c *ui.Context, depth float32, ref git.Ref, icon *ui.SVG, current bool, menu func(*ui.Menu)) {
@@ -261,7 +313,7 @@ func (a *App) repositoryRef(c *ui.Context, depth float32, ref git.Ref, icon *ui.
 	if current {
 		label = locales.GitCurrentBranch(ref.Name)
 	}
-	row := ui.ButtonBase(c.Key(ref.FullName)).FillWidth().Height(22).Shrink(0).AlignItems(ui.Center).
+	row := ui.ButtonBase(c.Key(ref.FullName)).FillWidth().Height(gitSidebarRowHeight).Shrink(0).AlignItems(ui.Center).
 		Label(label).Tooltip(label).Gap(5).Radius(5).Padding(0, 6, 0, 17+depth*12).KeepFocus().
 		OnClick(func() {
 			if h := &a.git.history; !current && !h.all {

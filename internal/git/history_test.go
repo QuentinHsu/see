@@ -334,3 +334,45 @@ func TestCommitPatch(t *testing.T) {
 		t.Fatalf("first commit: %v\n%s", err, out)
 	}
 }
+
+func TestDeleteBranchAndTag(t *testing.T) {
+	root, run := newRepo(t)
+	ctx := context.Background()
+	run("commit", "--allow-empty", "-qm", "first")
+	run("branch", "feature")
+	run("tag", "v1.0")
+
+	if err := DeleteBranch(ctx, root, "main"); err == nil {
+		t.Fatal("deleted the current branch")
+	}
+	if err := DeleteBranch(ctx, root, "feature"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(run("branch", "--list", "feature")); got != "" {
+		t.Fatalf("branch remains: %q", got)
+	}
+	if err := DeleteTag(ctx, root, "v1.0"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(run("tag", "--list", "v1.0")); got != "" {
+		t.Fatalf("tag remains: %q", got)
+	}
+}
+
+func TestDeleteRemoteBranch(t *testing.T) {
+	root, run := newRepo(t)
+	ctx := context.Background()
+	run("commit", "--allow-empty", "-qm", "first")
+	run("branch", "feature")
+	remote := t.TempDir()
+	run("init", "--bare", "-q", remote)
+	run("remote", "add", "origin", remote)
+	run("push", "-q", "origin", "feature")
+
+	if err := DeleteRemoteBranch(ctx, root, "origin", "feature"); err != nil {
+		t.Fatal(err)
+	}
+	if out := run("ls-remote", "--heads", "origin"); strings.Contains(out, "feature") {
+		t.Fatalf("remote branch remains:\n%s", out)
+	}
+}

@@ -12238,6 +12238,102 @@ func (msgs Messages) GitTagCreated(tag string) string {
 	return Catalog.Format(msgs.locale, "gitTagCreated", map[string]any{"tag": tag})
 }
 
+// GitDeleteBranchAction says "Delete Branch"
+// in the language the app shows.
+func GitDeleteBranchAction() string { return In(i18n.Locale()).GitDeleteBranchAction() }
+
+// GitDeleteBranchAction says "Delete Branch"
+// in the language of msgs.
+func (msgs Messages) GitDeleteBranchAction() string {
+	return Catalog.Format(msgs.locale, "gitDeleteBranchAction", nil)
+}
+
+// GitDeleteBranchQuestion says "Delete branch “{branch}”? This cannot be undone."
+// in the language the app shows.
+func GitDeleteBranchQuestion(branch string) string {
+	return In(i18n.Locale()).GitDeleteBranchQuestion(branch)
+}
+
+// GitDeleteBranchQuestion says "Delete branch “{branch}”? This cannot be undone."
+// in the language of msgs.
+func (msgs Messages) GitDeleteBranchQuestion(branch string) string {
+	return Catalog.Format(msgs.locale, "gitDeleteBranchQuestion", map[string]any{"branch": branch})
+}
+
+// GitDeletedBranch says "Deleted branch {branch}."
+// in the language the app shows.
+func GitDeletedBranch(branch string) string { return In(i18n.Locale()).GitDeletedBranch(branch) }
+
+// GitDeletedBranch says "Deleted branch {branch}."
+// in the language of msgs.
+func (msgs Messages) GitDeletedBranch(branch string) string {
+	return Catalog.Format(msgs.locale, "gitDeletedBranch", map[string]any{"branch": branch})
+}
+
+// GitDeleteTagAction says "Delete Tag"
+// in the language the app shows.
+func GitDeleteTagAction() string { return In(i18n.Locale()).GitDeleteTagAction() }
+
+// GitDeleteTagAction says "Delete Tag"
+// in the language of msgs.
+func (msgs Messages) GitDeleteTagAction() string {
+	return Catalog.Format(msgs.locale, "gitDeleteTagAction", nil)
+}
+
+// GitDeleteTagQuestion says "Delete tag “{tag}”? This cannot be undone."
+// in the language the app shows.
+func GitDeleteTagQuestion(tag string) string { return In(i18n.Locale()).GitDeleteTagQuestion(tag) }
+
+// GitDeleteTagQuestion says "Delete tag “{tag}”? This cannot be undone."
+// in the language of msgs.
+func (msgs Messages) GitDeleteTagQuestion(tag string) string {
+	return Catalog.Format(msgs.locale, "gitDeleteTagQuestion", map[string]any{"tag": tag})
+}
+
+// GitDeletedTag says "Deleted tag {tag}."
+// in the language the app shows.
+func GitDeletedTag(tag string) string { return In(i18n.Locale()).GitDeletedTag(tag) }
+
+// GitDeletedTag says "Deleted tag {tag}."
+// in the language of msgs.
+func (msgs Messages) GitDeletedTag(tag string) string {
+	return Catalog.Format(msgs.locale, "gitDeletedTag", map[string]any{"tag": tag})
+}
+
+// GitDeleteRemoteBranchAction says "Delete Remote Branch"
+// in the language the app shows.
+func GitDeleteRemoteBranchAction() string { return In(i18n.Locale()).GitDeleteRemoteBranchAction() }
+
+// GitDeleteRemoteBranchAction says "Delete Remote Branch"
+// in the language of msgs.
+func (msgs Messages) GitDeleteRemoteBranchAction() string {
+	return Catalog.Format(msgs.locale, "gitDeleteRemoteBranchAction", nil)
+}
+
+// GitDeleteRemoteBranchQuestion says "Delete branch “{branch}” on {remote}? Everyone using that remote loses it, and this cannot be undone."
+// in the language the app shows.
+func GitDeleteRemoteBranchQuestion(branch string, remote string) string {
+	return In(i18n.Locale()).GitDeleteRemoteBranchQuestion(branch, remote)
+}
+
+// GitDeleteRemoteBranchQuestion says "Delete branch “{branch}” on {remote}? Everyone using that remote loses it, and this cannot be undone."
+// in the language of msgs.
+func (msgs Messages) GitDeleteRemoteBranchQuestion(branch string, remote string) string {
+	return Catalog.Format(msgs.locale, "gitDeleteRemoteBranchQuestion", map[string]any{"branch": branch, "remote": remote})
+}
+
+// GitDeletedRemoteBranch says "Deleted {branch} on {remote}."
+// in the language the app shows.
+func GitDeletedRemoteBranch(branch string, remote string) string {
+	return In(i18n.Locale()).GitDeletedRemoteBranch(branch, remote)
+}
+
+// GitDeletedRemoteBranch says "Deleted {branch} on {remote}."
+// in the language of msgs.
+func (msgs Messages) GitDeletedRemoteBranch(branch string, remote string) string {
+	return Catalog.Format(msgs.locale, "gitDeletedRemoteBranch", map[string]any{"branch": branch, "remote": remote})
+}
+
 // GitCherryPick says "Cherry-pick"
 // in the language the app shows.
 func GitCherryPick() string { return In(i18n.Locale()).GitCherryPick() }

@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"strings"
 )
 
@@ -65,6 +66,19 @@ func CreateTag(ctx context.Context, root, name, message, commit string) error {
 		args = append(args, "--annotate", "--message", message)
 	}
 	_, err = Command(ctx, root, append(args, "--", name, hash)...)
+	return err
+}
+
+// DeleteTag deletes a tag, local only: a remote's tag stays until it is
+// pushed away.
+func DeleteTag(ctx context.Context, root, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("a tag needs a name")
+	}
+	if _, err := Command(ctx, root, "check-ref-format", "refs/tags/"+name); err != nil {
+		return errors.New("“" + name + "” is not a valid tag name")
+	}
+	_, err := Command(ctx, root, "tag", "-d", "--", name)
 	return err
 }
 

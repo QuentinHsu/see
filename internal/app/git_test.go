@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/i18n"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/editor"
 
@@ -127,6 +128,156 @@ func TestGitSectionDiscardsAllUnstagedChanges(t *testing.T) {
 	for name, want := range map[string]string{"a.txt": "staged a\n", "b.txt": "base b\n"} {
 		if got, err := os.ReadFile(filepath.Join(root, name)); err != nil || string(got) != want {
 			t.Fatalf("%s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+}
+
+func TestGitSectionsFoldIndependently(t *testing.T) {
+	root := gitRepo(t, map[string]string{"a.txt": "base a\n", "b.txt": "base b\n"})
+	writeFile(t, root, "a.txt", "staged a\n")
+	gitRun(t, root, "add", "a.txt")
+	writeFile(t, root, "b.txt", "changed b\n")
+	h := newHarness(t, root)
+	h.readGit()
+	h.a.navigator = navGit
+	h.a.git.historyClosed = true
+	h.tt.Frame()
+	if !h.tt.HasText("Staged diff: a.txt") || !h.tt.HasText("Unstaged diff: b.txt") {
+		t.Fatalf("sections do not start open: %q", h.tt.Texts())
+	}
+	changes, changesOK := h.tt.AccessByRole(ui.RoleButton, locales.MsgChanges())
+	unstaged, unstagedOK := h.tt.AccessByRole(ui.RoleButton, locales.MsgUnstagedChanges())
+	file, fileOK := h.tt.AccessByRole(ui.RoleButton, "Unstaged diff: b.txt")
+	if !changesOK || !unstagedOK || !fileOK ||
+		!(changes.Bounds.X < unstaged.Bounds.X && unstaged.Bounds.X < file.Bounds.X) {
+		t.Fatalf("section indentation is not one level between Changes and its rows: changes=%+v (%v) unstaged=%+v (%v) file=%+v (%v)",
+			changes, changesOK, unstaged, unstagedOK, file, fileOK)
+	}
+
+	if err := h.tt.Click(locales.MsgStagedChanges()); err != nil {
+		t.Fatal(err)
+	}
+	h.tt.Frame()
+	if h.tt.HasText("Staged diff: a.txt") || !h.tt.HasText("Unstaged diff: b.txt") {
+		t.Fatalf("folding staged changes hid the wrong rows: %q", h.tt.Texts())
+	}
+	if err := h.tt.Click(locales.MsgStagedChanges()); err != nil {
+		t.Fatal(err)
+	}
+	h.tt.Frame()
+	if !h.tt.HasText("Staged diff: a.txt") {
+		t.Fatalf("unfolding staged changes did not show its rows: %q", h.tt.Texts())
+	}
+
+	if err := h.tt.Click(locales.MsgUnstagedChanges()); err != nil {
+		t.Fatal(err)
+	}
+	h.tt.Frame()
+	if h.tt.HasText("Unstaged diff: b.txt") || !h.tt.HasText("Staged diff: a.txt") {
+		t.Fatalf("folding unstaged changes hid the wrong rows: %q", h.tt.Texts())
+	}
+	if _, ok := h.tt.AccessByRole(ui.RoleButton, locales.MsgStageAllChanges()); !ok {
+		t.Fatal("folding a section hid its stage-all action")
+	}
+}
+
+func TestDiscardChangeAsksInAModal(t *testing.T) {
+	root := gitRepo(t, map[string]string{"a.txt": "base\n"})
+	writeFile(t, root, "a.txt", "changed\n")
+	h := newHarness(t, root)
+	h.readGit()
+	h.a.navigator = navGit
+	h.a.git.historyClosed = true
+	h.tt.Frame()
+	if err := h.tt.Click(locales.MsgDiscardAllChanges()); err != nil {
+		t.Fatal(err)
+	}
+	h.tt.Frame()
+	if h.a.deleteConfirm == nil {
+		t.Fatal("discarding did not ask")
+	}
+	cancel, ok := h.tt.AccessByRole(ui.RoleButton, locales.Cancel())
+	if !ok || !cancel.Focused {
+		t.Fatalf("the confirmation's Cancel button is missing or unfocused: %+v (%v)", cancel, ok)
+	}
+	h.tt.Key(0, ui.KeyEscape)
+	h.tt.Frame()
+	if h.a.deleteConfirm != nil {
+		t.Fatal("Escape did not cancel")
+	}
+}
+
+func TestGitFolderDiscardIsDisabledWhileBusy(t *testing.T) {
+	root := gitRepo(t, map[string]string{"dir/a.txt": "base\n"})
+	writeFile(t, root, "dir/a.txt", "changed\n")
+	h := newHarness(t, root)
+	h.readGit()
+	h.a.navigator, h.a.git.historyClosed = navGit, true
+	h.a.git.busy = true
+	h.tt.Frame()
+	folder, ok := h.tt.Find("dir")
+	if !ok {
+		t.Fatalf("folder row is missing: %q", h.tt.Texts())
+	}
+	h.tt.Move(folder.X+folder.W-30, folder.Y+folder.H/2)
+	h.tt.Frame()
+	h.tt.Frame()
+	label := locales.Catalog.Format(i18n.Locale(), "msgDiscardChangesS", map[string]any{"path": "dir"})
+	var button ui.AccessInfo
+	ok = false
+	for range 5 {
+		h.tt.Frame()
+		if button, ok = h.tt.AccessByRole(ui.RoleButton, label); ok {
+			break
+		}
+	}
+	if !ok || !button.Disabled {
+		t.Fatalf("folder discard stays enabled while Git is busy: %+v (%v)", button, ok)
+	}
+}
+
+func TestGitFolderDiscardsEveryChangeUnderIt(t *testing.T) {
+	root := gitRepo(t, map[string]string{
+		"dir/a.txt":        "base a\n",
+		"dir/nested/b.txt": "base b\n",
+		"other.txt":        "base other\n",
+	})
+	for path, body := range map[string]string{
+		"dir/a.txt":        "changed a\n",
+		"dir/nested/b.txt": "changed b\n",
+		"other.txt":        "changed other\n",
+	} {
+		writeFile(t, root, path, body)
+	}
+
+	h := newHarness(t, root)
+	h.readGit()
+	h.a.navigator = navGit
+	h.a.git.historyClosed = true
+	h.tt.Frame()
+	folder, ok := h.tt.Find("dir")
+	if !ok {
+		t.Fatalf("folder row is missing: %q", h.tt.Texts())
+	}
+	h.tt.Move(folder.X+folder.W/2, folder.Y+folder.H/2)
+	h.tt.Frame()
+	label := locales.Catalog.Format(i18n.Locale(), "msgDiscardChangesS", map[string]any{"path": "dir"})
+	if err := h.tt.Click(label); err != nil {
+		t.Fatal(err)
+	}
+	if h.a.deleteConfirm == nil || !strings.Contains(h.a.deleteConfirm.message, "2") {
+		t.Fatalf("discarding a folder did not ask for its two files: %+v", h.a.deleteConfirm)
+	}
+	h.a.deleteConfirm.actions[0].fn()
+	h.settle(func() bool { return !h.a.git.busy && !h.a.git.loading })
+
+	for path, want := range map[string]string{
+		"dir/a.txt":        "base a\n",
+		"dir/nested/b.txt": "base b\n",
+		"other.txt":        "changed other\n",
+	} {
+		if got, err := os.ReadFile(filepath.Join(root, path)); err != nil || string(got) != want {
+			t.Fatalf("%s = %q, %v; want %q", path, got, err, want)
 		}
 	}
 }
@@ -470,6 +621,9 @@ func TestGitNavigatorShowsChangesOverHistory(t *testing.T) {
 	h.tt.Frame()
 	if !h.a.git.changesClosed || h.tt.HasText("a.go") || h.tt.HasText("Uncommitted Changes") || !h.tt.HasText("Add A") {
 		t.Fatalf("folded changes: %q", h.tt.Texts())
+	}
+	if _, ok := h.tt.AccessByRole(ui.RoleButton, locales.MsgRefresh()); !ok {
+		t.Fatal("folding Changes hid its refresh action")
 	}
 	if err := h.tt.Click("History"); err != nil {
 		t.Fatal(err)

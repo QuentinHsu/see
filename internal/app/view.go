@@ -153,10 +153,6 @@ func (a *App) view(c *ui.Context) {
 			q := a.confirm
 			a.banner(c, colors(c).WarnBg, q.message, q.actions)
 		}
-		if a.deleteConfirm != nil {
-			q := a.deleteConfirm
-			a.banner(c, colors(c).WarnBg, q.message, q.actions)
-		}
 		ui.Row(c).Grow(1).FillWidth().AlignItems(ui.Stretch).Children(func() {
 			if progress == 0 {
 				a.editorArea(c)
@@ -187,6 +183,47 @@ func (a *App) view(c *ui.Context) {
 	if a.git.repositoryView.tag != nil {
 		a.createTagDialog(c)
 	}
+	if a.deleteConfirm != nil {
+		a.deleteConfirmDialog(c)
+	}
+}
+
+// deleteConfirmDialog asks a destructive question as a modal alert, so
+// Trash, discarding changes, and dropping a stash all ask the same way.
+// Escape and a click outside it cancel, as the last action does.
+func (a *App) deleteConfirmDialog(c *ui.Context) {
+	q := a.deleteConfirm
+	if q == nil || len(q.actions) == 0 {
+		return
+	}
+	cancel := q.actions[len(q.actions)-1]
+	ui.Overlay(c, func() {
+		back := ui.Column(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Center().Padding(12).
+			Background(ui.RGBA(0, 0, 0, 0.18)).Modal()
+		if back.OverlayShortcut(0, ui.KeyEscape) {
+			cancel.fn()
+			return
+		}
+		back.OnClick(cancel.fn)
+		back.Children(func() {
+			ui.Column(c).FillWidth().MaxWidth(400).Radius(12).Padding(16).Gap(14).
+				Background(colors(c).Popover).Border(1, colors(c).PopoverEdge).
+				Shadow(0, 18, 48, 0, ui.RGBA(0, 0, 0, 0.5)).OnClick(func() {}).Children(func() {
+				ui.Text(c, q.message).FontSize(13).Wrap().FillWidth()
+				ui.Row(c).FillWidth().Gap(8).Justify(ui.End).AlignItems(ui.Center).Children(func() {
+					for i, action := range q.actions {
+						b := ui.Button(c, action.label).Height(26)
+						if i == len(q.actions)-1 {
+							b.AutoFocus()
+						}
+						if b.Clicked() {
+							action.fn()
+						}
+					}
+				})
+			})
+		})
+	})
 }
 
 // shortcuts handles the app's keys wherever the focus is.

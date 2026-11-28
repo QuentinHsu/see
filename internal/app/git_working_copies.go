@@ -14,23 +14,26 @@ import (
 )
 
 type gitWorkingCopy struct {
-	changes         []git.Change
-	foldedChanges   map[string]bool // folders folded in the changes tree, keyed by section:root:path
-	counts          [2]map[string]git.FileStat
-	selected        map[string]bool
-	selectionAnchor string
-	message         string
-	err             string
-	loading         bool
-	busy            bool
-	merging         bool
-	closed          bool
-	refreshSeq      uint64
-	diffSeq         uint64
+	changes       []git.Change
+	foldedChanges map[string]bool // folders folded in the changes tree, keyed by section:root:path
+	counts        [2]map[string]git.FileStat
+	selected      map[string]bool
+	// conflictedClosed, stagedClosed, and unstagedClosed fold this
+	// repository's changes groups, as its header folds them all.
+	conflictedClosed, stagedClosed, unstagedClosed bool
+	selectionAnchor                                string
+	message                                        string
+	err                                            string
+	loading                                        bool
+	busy                                           bool
+	merging                                        bool
+	closed                                         bool
+	refreshSeq                                     uint64
+	diffSeq                                        uint64
 }
 
 func (a *App) showsRepositoryChanges() bool {
-	return a.cfg.GitAutoDiscover && a.git.repositoriesLoaded && len(a.git.repositories) > 1 && a.git.branchDiffMode == uncommittedMode
+	return a.cfg.GitAutoDiscover && a.git.repositoriesLoaded && len(a.git.repositories) > 0 && a.git.branchDiffMode == uncommittedMode
 }
 
 func (a *App) gitChangeTabKey(root string, change git.Change, staged bool) string {
@@ -51,9 +54,6 @@ func (a *App) gitWorkingCopiesNavigator(c *ui.Context) {
 		}
 		ui.Column(c).Grow(1).FillWidth().Children(func() {
 			a.gitSectionHeader(c, locales.MsgChanges(), count, &a.git.changesClosed, func() {
-				if a.git.changesClosed {
-					return
-				}
 				if a.git.root != "" {
 					a.branchDiffModePicker(c)
 					if a.git.syncing != "" {
@@ -133,10 +133,7 @@ func (a *App) gitWorkingCopyGroup(c *ui.Context, root string, workingCopy *gitWo
 			unstaged++
 		}
 	}
-	label := filepath.Base(root)
-	if rel, err := filepath.Rel(a.realRoot, root); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		label = filepath.ToSlash(rel)
-	}
+	label := a.gitRepositoryLabel(root)
 	ui.Column(c.Key("changes-repository:" + root)).FillWidth().Children(func() {
 		repoDisclosure(c.Key("repository-header"), 0, label, icGit, workingCopy.closed, func() {
 			workingCopy.closed = !workingCopy.closed
@@ -177,20 +174,26 @@ func (a *App) gitWorkingCopyGroup(c *ui.Context, root string, workingCopy *gitWo
 		}
 		busy := workingCopy.busy || root == a.git.root && a.git.busy
 		if conflicts > 0 {
-			a.gitSection(c, gitConflictText("gitConflictedFiles"), conflicts, nil)
-			a.gitChangeRows(c, root, workingCopy, workingCopy.changes, gitChangeTreeSection{conflicted: true})
+			a.gitSection(c, "git-section:"+root+":conflicted", gitConflictText("gitConflictedFiles"), conflicts, &workingCopy.conflictedClosed, nil)
+			if !workingCopy.conflictedClosed {
+				a.gitChangeRows(c, root, workingCopy, workingCopy.changes, gitChangeTreeSection{conflicted: true})
+			}
 		}
 		if staged > 0 {
-			a.gitSection(c, locales.MsgStagedChanges(), staged, func() {
+			a.gitSection(c, "git-section:"+root+":staged", locales.MsgStagedChanges(), staged, &workingCopy.stagedClosed, func() {
 				a.gitSectionActions(c, root, workingCopy, workingCopy.changes, true, busy)
 			})
-			a.gitWorkingCopyRows(c, root, workingCopy, true)
+			if !workingCopy.stagedClosed {
+				a.gitWorkingCopyRows(c, root, workingCopy, true)
+			}
 		}
 		if unstaged > 0 {
-			a.gitSection(c, locales.MsgUnstagedChanges(), unstaged, func() {
+			a.gitSection(c, "git-section:"+root+":unstaged", locales.MsgUnstagedChanges(), unstaged, &workingCopy.unstagedClosed, func() {
 				a.gitSectionActions(c, root, workingCopy, workingCopy.changes, false, busy)
 			})
-			a.gitWorkingCopyRows(c, root, workingCopy, false)
+			if !workingCopy.unstagedClosed {
+				a.gitWorkingCopyRows(c, root, workingCopy, false)
+			}
 		}
 		if root == a.git.root {
 			a.stashRows(c)

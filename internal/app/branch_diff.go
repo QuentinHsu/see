@@ -102,7 +102,8 @@ func (a *App) branchDiffNavigator(c *ui.Context) {
 	v := a.git.branchPanel
 	if v == nil {
 		ui.Row(c).Height(gitSidebarGroupHeaderHeight).Padding(0, sidebarInset+gitSidebarTreeIndent).Children(func() {
-			button := ui.Button(c, branchDiffText("gitChooseBaseBranch")).FontSize(gitSidebarGroupLabelSize).MinWidth(0).Shrink(1)
+			button := ui.Button(c, branchDiffText("gitChooseBaseBranch")).FontSize(gitSidebarGroupLabelSize).Height(gitSidebarGroupHeaderHeight).
+				Padding(0, 4).MinWidth(0).Grow(1).Justify(ui.Start).Shrink(1)
 			if button.Clicked() {
 				a.openBaseBranchPicker(button.Bounds(), nil)
 			}
@@ -140,13 +141,13 @@ func (a *App) branchDiffNavigator(c *ui.Context) {
 					fileIcon(c, filepath.Base(f.Path), gitSidebarIconColumn)
 					gitFileNameAndPath(c, f.Path, f.OldPath, gitSidebarRowLabelSize)
 					if f.Added < 0 {
-						ui.Text(c, branchDiffText("gitBinary")).FontSize(10).TextColor(colors(c).Muted).SingleLine().Shrink(0)
+						ui.Text(c, branchDiffText("gitBinary")).FontSize(11).TextColor(colors(c).Muted).SingleLine().Shrink(0)
 					} else {
 						if f.Added > 0 {
-							ui.Text(c, fmt.Sprintf("+%d", f.Added)).FontSize(10).TextColor(a.gitStatusColor('A')).SingleLine().Shrink(0)
+							ui.Text(c, fmt.Sprintf("+%d", f.Added)).FontSize(11).TextColor(a.gitStatusColor('A')).SingleLine().Shrink(0)
 						}
 						if f.Deleted > 0 {
-							ui.Text(c, fmt.Sprintf("−%d", f.Deleted)).FontSize(10).TextColor(a.gitStatusColor('D')).SingleLine().Shrink(0)
+							ui.Text(c, fmt.Sprintf("−%d", f.Deleted)).FontSize(11).TextColor(a.gitStatusColor('D')).SingleLine().Shrink(0)
 						}
 					}
 				})

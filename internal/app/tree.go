@@ -131,6 +131,18 @@ func sortPathTree[T any](nodes []*pathTreeNode[T]) {
 	}
 }
 
+// pathTreeItems returns the leaves under node, at any depth.
+func pathTreeItems[T any](node *pathTreeNode[T]) []T {
+	if node.leaf {
+		return []T{node.item}
+	}
+	var items []T
+	for _, child := range node.children {
+		items = append(items, pathTreeItems(child)...)
+	}
+	return items
+}
+
 // walkPathTree visits each row shown, skipping the children of the
 // folders closed reports as folded.
 func walkPathTree[T any](nodes []*pathTreeNode[T], closed func(path string) bool, visit func(node *pathTreeNode[T], depth int)) {

@@ -103,6 +103,33 @@ func CreateBranch(ctx context.Context, root, name string) error {
 	return err
 }
 
+// DeleteBranch deletes a local branch, as the user confirmed its commits
+// may be lost.
+func DeleteBranch(ctx context.Context, root, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("a branch needs a name")
+	}
+	if _, err := Command(ctx, root, "check-ref-format", "--branch", name); err != nil {
+		return errors.New("“" + name + "” is not a valid branch name")
+	}
+	_, err := Command(ctx, root, "branch", "-D", "--", name)
+	return err
+}
+
+// DeleteRemoteBranch deletes a branch on a remote, which removes it for
+// everyone using that remote. The name is checked as a full ref, so a
+// branch that starts with a dash cannot become a push option.
+func DeleteRemoteBranch(ctx context.Context, root, remote, branch string) error {
+	if strings.TrimSpace(remote) == "" || strings.TrimSpace(branch) == "" {
+		return errors.New("a remote and a branch are needed")
+	}
+	if _, err := Command(ctx, root, "check-ref-format", "refs/heads/"+branch); err != nil {
+		return errors.New("“" + branch + "” is not a valid branch name")
+	}
+	_, err := Command(ctx, root, "push", "--delete", "--", remote, branch)
+	return err
+}
+
 // Commit is a commit of the history, and where the graph draws it.
 type Commit struct {
 	Hash, Short    string

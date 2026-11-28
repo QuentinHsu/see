@@ -75,6 +75,65 @@ func TestGitRepositoriesNavigator(t *testing.T) {
 	}
 }
 
+func TestGitRepositoriesDeleteRefs(t *testing.T) {
+	root := gitRepo(t, map[string]string{"a.txt": "base\n"}, "feature")
+	gitRun(t, root, "tag", "v1.0")
+	gitRun(t, root, "remote", "add", "origin", "../elsewhere")
+	gitRun(t, root, "update-ref", "refs/remotes/origin/topic", "HEAD")
+	h := newHarness(t, root)
+	h.readGit()
+	h.a.git.autoFetch = false
+	for _, label := range []string{locales.MsgGitNavigator(), locales.GitRepositories()} {
+		if err := h.tt.Click(label); err != nil {
+			t.Fatal(err)
+		}
+		h.tt.Frame()
+	}
+
+	if err := h.tt.RightClick("feature"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.tt.ChooseMenuItem(locales.GitDeleteBranchAction()); err != nil {
+		t.Fatal(err)
+	}
+	if h.a.deleteConfirm == nil || !strings.Contains(h.a.deleteConfirm.message, "feature") {
+		t.Fatalf("deleting a branch did not ask: %+v", h.a.deleteConfirm)
+	}
+	h.a.deleteConfirm.actions[0].fn()
+	h.settle(func() bool { return !h.a.git.busy && !h.a.git.loading })
+	if git.Resolve(context.Background(), root, "refs/heads/feature") != "" {
+		t.Fatal("branch remains after deleting it")
+	}
+
+	h.tt.Frame()
+	if err := h.tt.RightClick("v1.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.tt.ChooseMenuItem(locales.GitDeleteTagAction()); err != nil {
+		t.Fatal(err)
+	}
+	if h.a.deleteConfirm == nil || !strings.Contains(h.a.deleteConfirm.message, "v1.0") {
+		t.Fatalf("deleting a tag did not ask: %+v", h.a.deleteConfirm)
+	}
+	h.a.deleteConfirm.actions[0].fn()
+	h.settle(func() bool { return !h.a.git.busy && !h.a.git.loading })
+	if git.Resolve(context.Background(), root, "refs/tags/v1.0") != "" {
+		t.Fatal("tag remains after deleting it")
+	}
+
+	h.tt.Frame()
+	if err := h.tt.RightClick("topic"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.tt.ChooseMenuItem(locales.GitDeleteRemoteBranchAction()); err != nil {
+		t.Fatal(err)
+	}
+	if h.a.deleteConfirm == nil || !strings.Contains(h.a.deleteConfirm.message, "origin") {
+		t.Fatalf("deleting a remote branch did not ask: %+v", h.a.deleteConfirm)
+	}
+	h.a.deleteConfirm.actions[1].fn()
+}
+
 func TestGitRepositoriesTabsUseKeyboardAndSelectedState(t *testing.T) {
 	root := gitRepo(t, map[string]string{"a.txt": "base\n"})
 	h := newHarness(t, root)
@@ -152,6 +211,28 @@ func TestChildGitRepositoryDiscoveryIsOptInAndSelectionStaysExplicit(t *testing.
 		v := h.a.focus.diffs[diffTab(change.Path, false)]
 		return v != nil && v.state != nil
 	})
+}
+
+func TestSingleDiscoveredRepositoryGroupsItsChanges(t *testing.T) {
+	workspace := t.TempDir()
+	app := nestedGitRepo(t, filepath.Join(workspace, "app"), "a.txt", "base\n", "changed\n")
+	cfg := config.Load(filepath.Join(t.TempDir(), "settings.json"))
+	cfg.GitAutoDiscover = true
+	h := newHarnessWithConfig(t, workspace, cfg)
+	h.a.cfg.GitAutoDiscover = true
+	h.a.refreshGitDiscovery()
+	h.settle(func() bool {
+		wc := h.a.git.workingCopies[app]
+		return h.a.git.repositoriesLoaded && len(h.a.git.repositories) == 1 && wc != nil && !wc.loading && len(wc.changes) == 1
+	})
+	if !h.a.showsRepositoryChanges() {
+		t.Fatalf("one discovered repository should still show as a group: %+v", h.a.git.repositories)
+	}
+	h.a.navigator = navGit
+	h.tt.Frame()
+	if !h.tt.HasText("app") || !h.tt.HasText("Unstaged diff: a.txt") {
+		t.Fatalf("grouped working copy is missing its repository header or file: %q", h.tt.Texts())
+	}
 }
 
 func TestDiscoveredRepositoryChangesStayGroupedAndScoped(t *testing.T) {
@@ -247,7 +328,7 @@ func TestDiscoveredRepositoryChangesStayGroupedAndScoped(t *testing.T) {
 		if access.Bounds.Y <= backendHeader.Bounds.Y || access.Bounds.Y >= frontendHeader.Bounds.Y {
 			continue
 		}
-		if access.Role == ui.RoleText && (access.Name == locales.MsgUnstagedChanges() || access.Name == locales.MsgStagedChanges()) {
+		if (access.Role == ui.RoleText || access.Role == ui.RoleButton) && (access.Name == locales.MsgUnstagedChanges() || access.Name == locales.MsgStagedChanges()) {
 			backendSections = append(backendSections, access)
 		}
 		if access.Role == ui.RoleButton && strings.HasSuffix(access.Name, "shared.txt") {
@@ -346,7 +427,7 @@ func TestDiscoveredRepositoryCommitComposersShowForUnstagedChanges(t *testing.T)
 		if access.Role == ui.RoleButton && (access.Name == "backend" || access.Name == "frontend") {
 			headers = append(headers, access)
 		}
-		if access.Role == ui.RoleText && access.Name == locales.MsgUnstagedChanges() {
+		if (access.Role == ui.RoleText || access.Role == ui.RoleButton) && access.Name == locales.MsgUnstagedChanges() {
 			sections = append(sections, access)
 		}
 		if access.Role == ui.RoleButton && (strings.HasSuffix(access.Name, "backend.md") || strings.HasSuffix(access.Name, "frontend.md")) {
@@ -374,15 +455,7 @@ func TestDiscoveredRepositoryCommitComposersShowForUnstagedChanges(t *testing.T)
 		}
 	}
 	for _, section := range sections {
-		countVisible := false
-		for _, access := range h.tt.AccessAll() {
-			if access.Role == ui.RoleText && access.Name == "1" &&
-				access.Bounds.Y <= section.Bounds.Y+section.Bounds.H && access.Bounds.Y+access.Bounds.H >= section.Bounds.Y {
-				countVisible = true
-				break
-			}
-		}
-		if !countVisible {
+		if section.Description != "1" {
 			t.Fatalf("repository Changes section is missing its count: %+v", section)
 		}
 	}
@@ -415,8 +488,8 @@ func TestDiscoveredRepositoryCommitComposersShowForUnstagedChanges(t *testing.T)
 		t.Fatal("typing in a repository commit draft did not retain input focus")
 	}
 	for i, field := range fields {
-		if field.Bounds.X < sections[i].Bounds.X-1 || field.Bounds.X > sections[i].Bounds.X+1 {
-			t.Fatalf("repository group %d input text should align with its section label: input=%+v section=%+v", i, field, sections[i])
+		if field.Bounds.X < sections[i].Bounds.X || field.Bounds.X > fileRows[i].Bounds.X {
+			t.Fatalf("repository group %d input text should sit between its section and file rows: input=%+v section=%+v file=%+v", i, field, sections[i], fileRows[i])
 		}
 	}
 }
