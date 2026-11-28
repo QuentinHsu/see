@@ -19,26 +19,33 @@ import (
 	"see/internal/workspace"
 )
 
-// navigatorPane is the sidebar, over the window's material where there
-// is one: the navigator selector bar, then the navigator chosen.
+// navigatorPane is the primary sidebar, over the window's material where
+// there is one: the navigator selector bar, then the navigator chosen.
 func (a *App) navigatorPane(c *ui.Context, vibrant bool) {
 	pane := ui.Column(c).Fill().Background(sidebarColor(c, vibrant))
 	pane.Children(func() {
 		a.navigatorBar(c)
-		if a.navigator == navGit {
-			a.gitNavigator(c)
-		} else if a.navigator == navProblems {
-			a.problemsNavigator(c)
-		} else if a.navigator == navOutline {
-			a.outlineNavigator(c)
-		} else if a.navigator == navBookmarks {
-			a.bookmarksNavigator(c)
-		} else if a.navigator == navFind {
-			a.findNavigator(c)
-		} else {
-			a.projectNavigator(c)
-		}
+		a.navigatorContent(c, a.navigator)
 	})
+}
+
+// navigatorContent draws one navigator without its selector bar. The right
+// sidebar uses the same views after a user moves one there.
+func (a *App) navigatorContent(c *ui.Context, navigator int) {
+	switch navigator {
+	case navGit:
+		a.gitNavigator(c)
+	case navProblems:
+		a.problemsNavigator(c)
+	case navOutline:
+		a.outlineNavigator(c)
+	case navBookmarks:
+		a.bookmarksNavigator(c)
+	case navFind:
+		a.findNavigator(c)
+	default:
+		a.projectNavigator(c)
+	}
 }
 
 func sidebarColor(c *ui.Context, vibrant bool) ui.Color {
@@ -46,6 +53,28 @@ func sidebarColor(c *ui.Context, vibrant bool) ui.Color {
 		return colors(c).Sidebar.Alpha(0.78)
 	}
 	return colors(c).Sidebar
+}
+
+// navigatorDrag is a whole sidebar view being moved to the secondary
+// sidebar, rather than a row inside that view.
+type navigatorDrag struct {
+	navigator int
+}
+
+func (a *App) moveNavigatorRight(navigator int) {
+	if navigator < navFiles || navigator > navBookmarks {
+		return
+	}
+	a.rightNavigator = navigator
+	a.cfg.QuickHelpInspector = true
+	if a.navigator == navigator {
+		for next := navFiles; next <= navBookmarks; next++ {
+			if next != a.rightNavigator {
+				a.navigator = next
+				break
+			}
+		}
+	}
 }
 
 // thumbSpring moves the navigator bar's thumb: quick, with a little
@@ -83,6 +112,10 @@ func (a *App) navigatorBar(c *ui.Context) {
 					for i, s := range segments {
 						i, s := i, s
 						seg := parts.Segment(i).Width(segW).Height(24).Radius(12).Label(s.label).Tooltip(s.label)
+						seg.Drag(&navigatorDrag{navigator: i})
+						if seg.Dragging() {
+							a.navigatorDragging = true
+						}
 						seg.Children(func() {
 							color := colors(c).Muted
 							if i == a.navigator {
@@ -93,6 +126,9 @@ func (a *App) navigatorBar(c *ui.Context) {
 					}
 				})
 				if parts.Track.Changed() {
+					if a.navigator == a.rightNavigator {
+						a.rightNavigator = navNone
+					}
 					switch a.navigator {
 					case navGit:
 						a.refreshGit()

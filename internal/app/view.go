@@ -111,6 +111,7 @@ func (a *App) view(c *ui.Context) {
 	a.pauseHiddenVideos()
 	a.applyAppearance(c)
 	a.modifiers = c.Modifiers()
+	a.navigatorDragging = false
 	a.settleTabCycles()
 	c.SetTheme(a.theme)
 	a.services = c.Services()

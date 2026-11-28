@@ -94,7 +94,12 @@ func (a *App) toolbar(c *ui.Context, sidebarProgress float32, vibrant bool) {
 			if glassToolbarButton(c, icPanel, locales.Terminal(), commandLabel("terminal.toggle")+" ("+keyLabel("Cmd+Shift+", "Y")+")", a.term.open).Clicked() {
 				a.toggleTerminal()
 			}
-			if glassToolbarButton(c, icInspector, inspectorText("inspectorPane"), inspectorText("inspectorShowTip"), a.inspectorOpen()).Clicked() {
+			inspectorButton := glassToolbarButton(c, icInspector, inspectorText("inspectorPane"), inspectorText("inspectorShowTip"), a.inspectorOpen())
+			ui.DragOver[*navigatorDrag](inspectorButton)
+			if drag, ok := ui.Drop[*navigatorDrag](inspectorButton); ok {
+				a.moveNavigatorRight(drag.navigator)
+			}
+			if inspectorButton.Clicked() {
 				a.toggleInspector()
 			}
 		})

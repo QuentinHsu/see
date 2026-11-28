@@ -275,19 +275,32 @@ func (a *App) refreshInspector() {
 // navigation.
 func (a *App) inspectorView(c *ui.Context) {
 	in := &a.inspector
-	ui.Column(c).Fill().Background(colors(c).Sidebar).BorderWidth(0, 0, 0, 1).BorderColor(colors(c).Separator).Children(func() {
-		a.inspectorTabs(c)
-		switch a.inspectorTab() {
-		case "file":
-			a.inspectorFilePage(c)
-		case "history":
-			a.inspectorHistoryPage(c)
-		default:
-			a.inspectorHeader(c)
-			if in.loading {
-				ui.Box(c).FillWidth().Height(1).Background(c.Theme().Accent).Shrink(0)
+	pane := ui.Column(c).Fill().Background(colors(c).Sidebar).BorderWidth(0, 0, 0, 1).BorderColor(colors(c).Separator)
+	_, over := ui.DragOver[*navigatorDrag](pane)
+	if drag, ok := ui.Drop[*navigatorDrag](pane); ok {
+		a.moveNavigatorRight(drag.navigator)
+	}
+	pane.Children(func() {
+		if a.rightNavigator != navNone {
+			a.navigatorContent(c, a.rightNavigator)
+		} else {
+			a.inspectorTabs(c)
+			switch a.inspectorTab() {
+			case "file":
+				a.inspectorFilePage(c)
+			case "history":
+				a.inspectorHistoryPage(c)
+			default:
+				a.inspectorHeader(c)
+				if in.loading {
+					ui.Box(c).FillWidth().Height(1).Background(c.Theme().Accent).Shrink(0)
+				}
+				a.inspectorBody(c)
 			}
-			a.inspectorBody(c)
+		}
+		if over {
+			ui.Box(c).Absolute().Left(3).Right(3).Top(3).Bottom(3).
+				Background(colors(c).DropZone).Border(2, c.Theme().Accent).Radius(6).PassThrough()
 		}
 	})
 }

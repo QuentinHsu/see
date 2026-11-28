@@ -88,7 +88,12 @@ func (a *App) captureSession() {
 	if a.cfg.Workspaces == nil {
 		a.cfg.Workspaces = make(map[string]config.Workspace)
 	}
-	workspace := config.Workspace{Layout: snapshot(a.layout), SidebarHidden: a.sidebarOff, Navigator: a.navigator, ChangesClosed: a.git.changesClosed, StashesClosed: a.git.stashesClosed, HistoryClosed: a.git.historyClosed, GitSplit: a.git.split, GitLogSplit: a.git.logSplit, WindowWidth: a.windowWidth, WindowHeight: a.windowHeight, Bookmarks: a.sessionBookmarks()}
+	var rightNavigator *int
+	if a.rightNavigator != navNone {
+		n := a.rightNavigator
+		rightNavigator = &n
+	}
+	workspace := config.Workspace{Layout: snapshot(a.layout), SidebarHidden: a.sidebarOff, Navigator: a.navigator, RightNavigator: rightNavigator, ChangesClosed: a.git.changesClosed, StashesClosed: a.git.stashesClosed, HistoryClosed: a.git.historyClosed, GitSplit: a.git.split, GitLogSplit: a.git.logSplit, WindowWidth: a.windowWidth, WindowHeight: a.windowHeight, Bookmarks: a.sessionBookmarks()}
 	if a.workspaceChanged {
 		workspace.Folders = savedWorkspaceFolders(a.workspaceFolders)
 	}
@@ -217,6 +222,10 @@ func (a *App) restoreSession() {
 	a.sidebarOff = s.SidebarHidden
 	if s.Navigator >= navFiles && s.Navigator <= navBookmarks {
 		a.navigator = s.Navigator
+	}
+	if s.RightNavigator != nil && *s.RightNavigator >= navFiles && *s.RightNavigator <= navBookmarks {
+		a.rightNavigator = *s.RightNavigator
+		a.cfg.QuickHelpInspector = true
 	}
 	a.git.changesClosed, a.git.stashesClosed, a.git.historyClosed, a.git.split, a.git.logSplit = s.ChangesClosed, s.StashesClosed, s.HistoryClosed, s.GitSplit, s.GitLogSplit
 	a.openRestoredTerminals(s)

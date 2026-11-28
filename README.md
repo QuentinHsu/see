@@ -145,6 +145,8 @@ Use **F8** / **Shift+F8** or **Next Problem** / **Previous Problem** in the comm
 
 Use **Next Method** / **Previous Method** to move the caret to the name of the next or previous function, method or constructor in the current file, as JetBrains IDEs do. The shortcuts are **Ctrl+Option+↓/↑** on macOS and **Alt+↓/↑** on Windows and Linux, which replace the editor's move-line keys there. Navigation uses the language server's document symbols, stops at the first and last declaration, and waits for fresh symbols after edits.
 
+Drag a navigator view, such as **Outline**, from the left sidebar onto the right-side **Quick Help Inspector**. See moves that view to the right; the left sidebar selects the next available view. To move it back, select the moved view again in the left sidebar.
+
 Use **Search File Symbols** or type `@` in Open Quickly to list declarations in the current text file. Type after `@` to filter names, then select a result to jump to it. This uses the file’s language server and requires workspace trust. Results refresh when the active file or buffer changes.
 
 Use **Related Items** in the editor jump bar, or **Find References** and **Find Callers** in the command palette, to move between locations. Callers uses the language server's incoming call hierarchy, so availability depends on the server.

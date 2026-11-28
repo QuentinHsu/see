@@ -58,6 +58,61 @@ func TestNavigatorBarSegmentsScrollSideways(t *testing.T) {
 	}
 }
 
+func TestNavigatorViewCanMoveToRightSidebar(t *testing.T) {
+	h := newHarness(t, writeTree(t, map[string]string{"file.txt": "file\n"}))
+	h.a.cfg.Trust(h.a.root)
+	h.open("file.txt")
+	h.a.cfg.QuickHelpInspector = true
+	h.tt.Frame()
+
+	source, ok := h.tt.AccessByRole(ui.RoleRadio, outlineText("outlineTitle"))
+	if !ok {
+		t.Fatal("outline navigator segment is missing")
+	}
+	target, ok := h.tt.Find(inspectorText("inspectorEmpty"))
+	if !ok {
+		t.Fatalf("right sidebar drop target is missing: %q", h.tt.Texts())
+	}
+	h.tt.Press(source.Bounds.X+source.Bounds.W/2, source.Bounds.Y+source.Bounds.H/2)
+	h.tt.Move(target.X+target.W/2, target.Y+target.H/2)
+	h.tt.Release(target.X+target.W/2, target.Y+target.H/2)
+	h.tt.Frame()
+
+	if h.a.rightNavigator != navOutline {
+		t.Fatalf("moved navigator = %d, want outline", h.a.rightNavigator)
+	}
+	if h.a.navigator == navOutline {
+		t.Fatal("moved navigator remained selected in the primary sidebar")
+	}
+	if !h.tt.HasText(outlineText("outlineTitle")) {
+		t.Fatalf("right sidebar does not show Outline: %q", h.tt.Texts())
+	}
+}
+
+func TestNavigatorViewCanMoveToClosedRightSidebar(t *testing.T) {
+	h := newHarness(t, writeTree(t, map[string]string{"file.txt": "file\n"}))
+	h.a.cfg.Trust(h.a.root)
+	h.open("file.txt")
+	h.tt.Frame()
+
+	source, ok := h.tt.AccessByRole(ui.RoleRadio, outlineText("outlineTitle"))
+	if !ok {
+		t.Fatal("outline navigator segment is missing")
+	}
+	target, ok := h.tt.AccessByRole(ui.RoleToggleButton, inspectorText("inspectorPane"))
+	if !ok {
+		t.Fatalf("inspector toolbar button is missing: %v", h.tt.AccessAll())
+	}
+	h.tt.Press(source.Bounds.X+source.Bounds.W/2, source.Bounds.Y+source.Bounds.H/2)
+	h.tt.Move(target.Bounds.X+target.Bounds.W/2, target.Bounds.Y+target.Bounds.H/2)
+	h.tt.Release(target.Bounds.X+target.Bounds.W/2, target.Bounds.Y+target.Bounds.H/2)
+	h.tt.Frame()
+
+	if h.a.rightNavigator != navOutline || !h.a.inspectorOpen() {
+		t.Fatalf("closed right sidebar did not accept Outline: view=%d inspector=%v", h.a.rightNavigator, h.a.inspectorOpen())
+	}
+}
+
 func TestNavigatorKeyboardSelectionScrollsIntoView(t *testing.T) {
 	h := newHarness(t, writeTree(t, map[string]string{"file.txt": "file\n"}))
 	h.a.sidebarW = 210

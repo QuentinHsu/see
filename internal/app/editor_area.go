@@ -49,6 +49,26 @@ func (a *App) editorArea(c *ui.Context) {
 				a.inspectorDivider(c)
 				a.inspectorView(c)
 			})
+		} else if a.navigatorDragging {
+			ui.Column(c).Width(120).FillHeight().Shrink(0).Padding(6).Children(func() {
+				a.navigatorDropPane(c)
+			})
+		}
+	})
+}
+
+// navigatorDropPane is the secondary-sidebar landing strip shown while the
+// right sidebar is closed. Dropping there opens the moved view on the right
+// instead of making the user open Quick Help first.
+func (a *App) navigatorDropPane(c *ui.Context) {
+	pane := ui.Column(c).Fill().Background(colors(c).Sidebar).Radius(6)
+	_, over := ui.DragOver[*navigatorDrag](pane)
+	if drag, ok := ui.Drop[*navigatorDrag](pane); ok {
+		a.moveNavigatorRight(drag.navigator)
+	}
+	pane.Children(func() {
+		if over {
+			ui.Box(c).Fill().Background(colors(c).DropZone).Border(2, c.Theme().Accent).Radius(6).PassThrough()
 		}
 	})
 }

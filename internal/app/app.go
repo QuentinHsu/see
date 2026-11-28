@@ -130,21 +130,21 @@ type App struct {
 	// directory, which the harness cannot see and the cleanup cannot
 	// remove.
 	localHistoryWrites sync.WaitGroup
-	layout            *layout
-	maximized         *group
-	recents           []string // the files activated lately, across groups, most recent last
-	focus             *group
-	focusGroupTarget  *group
-	nextGroup         int
-	focusEditor       *editor.State // an editor to give the keyboard to
-	focusImage        string        // an image preview to give the keyboard to once loaded
-	closed            []closedTab   // tabs Reopen Closed Tab can bring back, most recent last
-	quickHelp         *editor.State
-	quickHelpBounds   ui.Rect
-	quickHelpRendered bool
-	quickHelpRequest  *editor.State
-	quickHelpSeq      uint64
-	inspector         quickHelpInspector
+	layout             *layout
+	maximized          *group
+	recents            []string // the files activated lately, across groups, most recent last
+	focus              *group
+	focusGroupTarget   *group
+	nextGroup          int
+	focusEditor        *editor.State // an editor to give the keyboard to
+	focusImage         string        // an image preview to give the keyboard to once loaded
+	closed             []closedTab   // tabs Reopen Closed Tab can bring back, most recent last
+	quickHelp          *editor.State
+	quickHelpBounds    ui.Rect
+	quickHelpRendered  bool
+	quickHelpRequest   *editor.State
+	quickHelpSeq       uint64
+	inspector          quickHelpInspector
 
 	// Navigation.
 	hist                nav.History
@@ -229,7 +229,9 @@ type App struct {
 	allowDirty    bool
 	quitApproved  bool
 
-	navigator             int // the sidebar's navigator
+	navigator             int  // the primary sidebar's navigator
+	rightNavigator        int  // the view moved into the right sidebar, or navNone
+	navigatorDragging     bool // a primary navigator view is being dragged
 	sidebarOff            bool
 	titleButton           ui.Handle // the toolbar's project name, over which its menu shows
 	titleOpen             bool
@@ -256,6 +258,8 @@ type App struct {
 	// setAppearance forces light or dark, or "" the system's; the app's
 	// windows follow it.
 }
+
+const navNone = -1
 
 const (
 	navFiles = iota
@@ -413,6 +417,7 @@ func newApp(cfg *config.Config) *App {
 		logf:                  log.Printf,
 		treeRow:               -1,
 		sidebarW:              260,
+		rightNavigator:        navNone,
 		ownsStandaloneSession: true,
 		standaloneSessionDocs: make(map[string]struct{}),
 		discardedSessionDocs:  make(map[string]struct{}),
